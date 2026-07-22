@@ -73,6 +73,11 @@ class CyberPowerPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
         await self.async_request_refresh()
         self.hass.async_create_task(self._async_delayed_refresh(10))
 
+    async def async_set_preferred_source(self, source: int) -> None:
+        await self.client.async_set_preferred_source(source)
+        await asyncio.sleep(1)
+        await self.async_request_refresh()
+
     async def async_close(self) -> None:
         await self.client.async_close()
 

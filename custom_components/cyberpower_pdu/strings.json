@@ -57,5 +57,10 @@
         }
       }
     }
+  },
+  "select": {
+    "preferred_source": {
+      "name": "Preferred Source"
+    }
   }
 }

@@ -14,6 +14,7 @@ from homeassistant.const import (
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
     UnitOfEnergy,
+    UnitOfFrequency,
     UnitOfPower,
 )
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -21,7 +22,81 @@ from homeassistant.helpers import entity_registry as er
 
 from . import CyberPowerPduConfigEntry
 from .entity import CyberPowerPduEntity
-from .snmp import CyberPowerPduData
+from .snmp import CyberPowerPduData, CyberPowerPduSource
+
+SOURCE_SELECTED_OPTIONS = {1: "Source A", 2: "Source B", 3: "None"}
+
+
+@dataclass(frozen=True, kw_only=True)
+class SourceSensorDescription(SensorEntityDescription):
+    value_fn: Callable[[CyberPowerPduSource], int | float | str | None]
+
+
+SOURCE_SENSORS: tuple[SourceSensorDescription, ...] = (
+    SourceSensorDescription(
+        key="selected_source",
+        name="Selected Source",
+        device_class=None,
+        value_fn=lambda src: SOURCE_SELECTED_OPTIONS.get(
+            src.selected_source, "Unknown"
+        )
+        if src.selected_source is not None
+        else None,
+    ),
+    SourceSensorDescription(
+        key="source_a_voltage",
+        name="Source A Voltage",
+        device_class=SensorDeviceClass.VOLTAGE,
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda src: src.source_a_voltage,
+    ),
+    SourceSensorDescription(
+        key="source_b_voltage",
+        name="Source B Voltage",
+        device_class=SensorDeviceClass.VOLTAGE,
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda src: src.source_b_voltage,
+    ),
+    SourceSensorDescription(
+        key="source_a_frequency",
+        name="Source A Frequency",
+        device_class=SensorDeviceClass.FREQUENCY,
+        native_unit_of_measurement=UnitOfFrequency.HERTZ,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda src: src.source_a_frequency,
+    ),
+    SourceSensorDescription(
+        key="source_b_frequency",
+        name="Source B Frequency",
+        device_class=SensorDeviceClass.FREQUENCY,
+        native_unit_of_measurement=UnitOfFrequency.HERTZ,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda src: src.source_b_frequency,
+    ),
+    SourceSensorDescription(
+        key="redundancy_state",
+        name="Redundancy State",
+        device_class=None,
+        value_fn=lambda src: (
+            "Redundant" if src.redundancy_state == 2 else "Lost"
+            if src.redundancy_state == 1
+            else None
+        ),
+    ),
+    SourceSensorDescription(
+        key="phase_sync",
+        name="Phase Sync",
+        device_class=None,
+        value_fn=lambda src: (
+            "In Sync" if src.phase_sync == 1 else "Out of Sync"
+            if src.phase_sync == 2
+            else None
+        ),
+    ),
+)
+
 
 LEGACY_OUTLET_SENSOR_KEYS = (
     "power",
@@ -88,9 +163,16 @@ async def async_setup_entry(
 ) -> None:
     coordinator = entry.runtime_data
     _remove_legacy_outlet_sensors(hass, entry)
-    async_add_entities(
+    entities = [
         CyberPowerPduSensor(coordinator, description) for description in PDU_SENSORS
-    )
+    ]
+    # Source sensors are only created when the device exposes ATS source data
+    if coordinator.data and coordinator.data.source is not None:
+        entities.extend(
+            CyberPowerPduSourceSensor(coordinator, description)
+            for description in SOURCE_SENSORS
+        )
+    async_add_entities(entities)
 
 
 class CyberPowerPduSensor(CyberPowerPduEntity, SensorEntity):
@@ -111,6 +193,31 @@ class CyberPowerPduSensor(CyberPowerPduEntity, SensorEntity):
     @property
     def available(self) -> bool:
         return super().available and self.native_value is not None
+
+
+class CyberPowerPduSourceSensor(CyberPowerPduEntity, SensorEntity):
+    entity_description: SourceSensorDescription
+
+    def __init__(self, coordinator, description: SourceSensorDescription) -> None:
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_name = description.name
+        self._attr_unique_id = f"{coordinator.device_identifier}_source_{description.key}"
+
+    @property
+    def native_value(self) -> int | float | str | None:
+        if not self.coordinator.data or not self.coordinator.data.source:
+            return None
+        return self.entity_description.value_fn(self.coordinator.data.source)
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self.coordinator.data.source is not None
+            and self.native_value is not None
+        )
 
 
 def _remove_legacy_outlet_sensors(hass, entry: CyberPowerPduConfigEntry) -> None:

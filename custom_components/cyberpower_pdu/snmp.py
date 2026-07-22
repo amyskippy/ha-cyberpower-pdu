@@ -70,6 +70,12 @@ ATS_OUTLET_DEVICE = "1.3.6.1.4.1.3808.1.1.5.6.1"
 ATS_OUTLET_CONTROL = "1.3.6.1.4.1.3808.1.1.5.6.5.1"
 ATS_OUTLET_STATUS = "1.3.6.1.4.1.3808.1.1.5.6.3.1"
 
+# ATS PDU info (PDU44004, PDU44005)
+EPDU2_IDENT = "1.3.6.1.4.1.3808.1.1.6"
+EPDU2_ROLE = f"{EPDU2_IDENT}.1.0"
+EPDU2_SOURCE_CONFIG = f"{EPDU2_IDENT}.9.2.1"
+EPDU2_SOURCE_STATUS = f"{EPDU2_IDENT}.9.4.1"
+
 DEVICE_OIDS = {
     "name": f"{EPDU_IDENT}.1.0",
     "hardware": f"{EPDU_IDENT}.2.0",
@@ -192,6 +198,7 @@ class CyberPowerPduDevice:
     hardware: str | None
     outlet_count: int | None
     controlled_outlets: int | None
+    has_source: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -217,6 +224,24 @@ class CyberPowerPduOutlet:
 
 
 @dataclass(slots=True, frozen=True)
+class CyberPowerPduSource:
+    selected_source: int | None  # 1=A, 2=B, 3=none
+    source_a_voltage: float | None  # Volts (scaled from 0.1V)
+    source_b_voltage: float | None
+    source_a_frequency: float | None  # Hz (scaled from 0.1Hz)
+    source_b_frequency: float | None
+    source_a_voltage_status: int | None  # 1=normal, 2=over, 3=under
+    source_b_voltage_status: int | None
+    source_a_frequency_status: int | None  # 1=normal, 2=over, 3=under
+    source_b_frequency_status: int | None
+    phase_sync: int | None  # 1=inSync, 2=outOfSync
+    power_supply_a_status: int | None  # 1=normal, 2/3/4=failed
+    power_supply_b_status: int | None
+    redundancy_state: int | None  # 1=lost, 2=fully_redundant
+    preferred_source: int | None  # 1=A, 2=B, 3=none (from config)
+
+
+@dataclass(slots=True, frozen=True)
 class CyberPowerPduData:
     device: CyberPowerPduDevice
     outlets: tuple[CyberPowerPduOutlet, ...]
@@ -226,6 +251,7 @@ class CyberPowerPduData:
     apparent_power: int | None
     power_factor: float | None
     energy: float | None
+    source: CyberPowerPduSource | None = None
 
     def outlet(self, index: int) -> CyberPowerPduOutlet | None:
         return next((outlet for outlet in self.outlets if outlet.index == index), None)
@@ -237,6 +263,7 @@ class CyberPowerPduClient:
         self._engine: SnmpEngine | None = None
         self._lock = asyncio.Lock()
         self._mib_branch = MIB_BRANCH_EPDU
+        self._has_source = False
 
     async def async_close(self) -> None:
         if self._engine is not None:
@@ -276,6 +303,10 @@ class CyberPowerPduClient:
                 for index in range(1, count + 1)
             )
 
+            source = None
+            if self._has_source:
+                source = await self._fetch_source_locked()
+
             return CyberPowerPduData(
                 device=device,
                 outlets=outlets,
@@ -285,6 +316,7 @@ class CyberPowerPduClient:
                 apparent_power=_as_int(total_values.get(TOTAL_OIDS["apparent_power"])),
                 power_factor=_as_scaled_number(total_values.get(TOTAL_OIDS["power_factor"]), 100),
                 energy=_as_scaled_number(total_values.get(TOTAL_OIDS["energy"]), 10),
+                source=source,
             )
 
     async def async_set_outlet_power(self, index: int, on: bool) -> None:
@@ -302,11 +334,31 @@ class CyberPowerPduClient:
                 oid = f"{EPDU_OUTLET_CONTROL}.{OUTLET_CONTROL_COMMAND_COLUMN}.{index}"
             await self._set_int_locked(oid, command)
 
+    async def async_set_preferred_source(self, source: int) -> None:
+        """Set preferred power source (1=A, 2=B, 3=none)."""
+        async with self._lock:
+            # Module 1 is the local PDU; preferred source config column is 3
+            oid = f"{EPDU2_SOURCE_CONFIG}.3.1"
+            await self._set_int_locked(oid, source)
+
+    async def _fetch_source_locked(self) -> CyberPowerPduSource | None:
+        """Fetch ATS source status from ePDU2 branch (module 1 = local PDU)."""
+        try:
+            oids = _source_status_oids()
+            values = await self._get_many_locked(oids)
+            return _build_source(values)
+        except CyberPowerPduSnmpError as err:
+            if err.is_missing_oid:
+                self._has_source = False
+            return None
+
     async def _fetch_device_info_locked(self) -> CyberPowerPduDevice:
         values = await self._get_many_locked(DEVICE_OIDS.values())
         epdu_device = _build_device(self._config.host, MIB_BRANCH_EPDU, DEVICE_OIDS, values)
         if epdu_device.outlet_count or epdu_device.controlled_outlets:
             self._mib_branch = MIB_BRANCH_EPDU
+            # Check for ePDU2 source capability (ATS PDUs like PDU44004/44005)
+            await self._detect_source_capability()
             return epdu_device
 
         values = await self._get_many_locked(ATS_DEVICE_OIDS.values())
@@ -319,6 +371,17 @@ class CyberPowerPduClient:
             self._mib_branch = MIB_BRANCH_EPDU
             return epdu_device
         return ats_device
+
+    async def _detect_source_capability(self) -> None:
+        """Probe ePDU2Role OID to check if this device has ATS source info."""
+        try:
+            values = await self._get_many_locked((EPDU2_ROLE,))
+            role_value = values.get(EPDU2_ROLE)
+            role_int = _as_int(role_value)
+            if role_int is not None and role_int >= 1:
+                self._has_source = True
+        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
+            pass
 
     async def _get_many_locked(self, oids: Iterable[str]) -> dict[str, Any | None]:
         results: dict[str, Any | None] = {}
@@ -598,6 +661,75 @@ def _normalise_outlet_power(power: int | None, current: float | None) -> int | N
     if power == 0 and current is not None and current > 0:
         return None
     return power
+
+
+def _source_status_oids() -> tuple[str, ...]:
+    """Build OIDs for source status table (module 1 = local PDU).
+
+    ePDU2SourceStatusEntry columns:
+      1=index, 2=moduleIndex, 3=selectedSource, 4=nominalFrequency,
+      5=sourceAVoltage, 6=sourceBVoltage, 7=sourceAFrequency, 8=sourceBFrequency,
+      9=sourceAVolStatus, 10=sourceBVolStatus, 11=sourceAFreqStatus,
+      12=sourceBFreqStatus, 13=phaseSync, 14=pwrSupplyAStatus,
+      15=pwrSupplyBStatus, 16=redundancyState
+    ePDU2SourceConfigEntry column 3 = preferredSource
+    """
+    return (
+        f"{EPDU2_SOURCE_STATUS}.3.1",   # selectedSource
+        f"{EPDU2_SOURCE_STATUS}.5.1",   # sourceAVoltage
+        f"{EPDU2_SOURCE_STATUS}.6.1",   # sourceBVoltage
+        f"{EPDU2_SOURCE_STATUS}.7.1",   # sourceAFrequency
+        f"{EPDU2_SOURCE_STATUS}.8.1",   # sourceBFrequency
+        f"{EPDU2_SOURCE_STATUS}.9.1",   # sourceAVolStatus
+        f"{EPDU2_SOURCE_STATUS}.10.1",  # sourceBVolStatus
+        f"{EPDU2_SOURCE_STATUS}.11.1",  # sourceAFreqStatus
+        f"{EPDU2_SOURCE_STATUS}.12.1",  # sourceBFreqStatus
+        f"{EPDU2_SOURCE_STATUS}.13.1",  # phaseSync
+        f"{EPDU2_SOURCE_STATUS}.14.1",  # pwrSupplyAStatus
+        f"{EPDU2_SOURCE_STATUS}.15.1",  # pwrSupplyBStatus
+        f"{EPDU2_SOURCE_STATUS}.16.1",  # redundancyState
+        f"{EPDU2_SOURCE_CONFIG}.3.1",   # preferredSource
+    )
+
+
+_SOURCE_OID_MAP = {
+    "selected_source": f"{EPDU2_SOURCE_STATUS}.3.1",
+    "source_a_voltage": f"{EPDU2_SOURCE_STATUS}.5.1",
+    "source_b_voltage": f"{EPDU2_SOURCE_STATUS}.6.1",
+    "source_a_frequency": f"{EPDU2_SOURCE_STATUS}.7.1",
+    "source_b_frequency": f"{EPDU2_SOURCE_STATUS}.8.1",
+    "source_a_voltage_status": f"{EPDU2_SOURCE_STATUS}.9.1",
+    "source_b_voltage_status": f"{EPDU2_SOURCE_STATUS}.10.1",
+    "source_a_frequency_status": f"{EPDU2_SOURCE_STATUS}.11.1",
+    "source_b_frequency_status": f"{EPDU2_SOURCE_STATUS}.12.1",
+    "phase_sync": f"{EPDU2_SOURCE_STATUS}.13.1",
+    "power_supply_a_status": f"{EPDU2_SOURCE_STATUS}.14.1",
+    "power_supply_b_status": f"{EPDU2_SOURCE_STATUS}.15.1",
+    "redundancy_state": f"{EPDU2_SOURCE_STATUS}.16.1",
+    "preferred_source": f"{EPDU2_SOURCE_CONFIG}.3.1",
+}
+
+
+def _build_source(values: dict[str, Any | None]) -> CyberPowerPduSource:
+    def v(name: str) -> Any | None:
+        return values.get(_SOURCE_OID_MAP[name])
+
+    return CyberPowerPduSource(
+        selected_source=_as_int(v("selected_source")),
+        source_a_voltage=_as_scaled_number(v("source_a_voltage"), 10),
+        source_b_voltage=_as_scaled_number(v("source_b_voltage"), 10),
+        source_a_frequency=_as_scaled_number(v("source_a_frequency"), 10),
+        source_b_frequency=_as_scaled_number(v("source_b_frequency"), 10),
+        source_a_voltage_status=_as_int(v("source_a_voltage_status")),
+        source_b_voltage_status=_as_int(v("source_b_voltage_status")),
+        source_a_frequency_status=_as_int(v("source_a_frequency_status")),
+        source_b_frequency_status=_as_int(v("source_b_frequency_status")),
+        phase_sync=_as_int(v("phase_sync")),
+        power_supply_a_status=_as_int(v("power_supply_a_status")),
+        power_supply_b_status=_as_int(v("power_supply_b_status")),
+        redundancy_state=_as_int(v("redundancy_state")),
+        preferred_source=_as_int(v("preferred_source")),
+    )
 
 
 def _bounded_outlet_count(value: int) -> int:

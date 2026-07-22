@@ -9,6 +9,7 @@ PLATFORMS: tuple[Platform, ...] = (
     Platform.SWITCH,
     Platform.BUTTON,
     Platform.SELECT,
+    Platform.BINARY_SENSOR,
 )
 
 CONF_AUTH_KEY = "auth_key"

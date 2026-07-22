@@ -16,13 +16,14 @@ from homeassistant.const import (
     UnitOfEnergy,
     UnitOfFrequency,
     UnitOfPower,
+    UnitOfTemperature,
 )
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers import entity_registry as er
 
 from . import CyberPowerPduConfigEntry
 from .entity import CyberPowerPduEntity
-from .snmp import CyberPowerPduData, CyberPowerPduSource
+from .snmp import CyberPowerPduData, CyberPowerPduEnvironment, CyberPowerPduSource
 
 SOURCE_SELECTED_OPTIONS = {1: "Source A", 2: "Source B", 3: "None"}
 
@@ -94,6 +95,31 @@ SOURCE_SENSORS: tuple[SourceSensorDescription, ...] = (
             if src.phase_sync == 2
             else None
         ),
+    ),
+)
+
+
+@dataclass(frozen=True, kw_only=True)
+class EnvironmentSensorDescription(SensorEntityDescription):
+    value_fn: Callable[[CyberPowerPduEnvironment], float | None]
+
+
+ENVIRONMENT_SENSORS: tuple[EnvironmentSensorDescription, ...] = (
+    EnvironmentSensorDescription(
+        key="temperature",
+        name="Temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda env: env.temperature,
+    ),
+    EnvironmentSensorDescription(
+        key="humidity",
+        name="Humidity",
+        device_class=SensorDeviceClass.HUMIDITY,
+        native_unit_of_measurement="%",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda env: env.humidity,
     ),
 )
 
@@ -172,6 +198,12 @@ async def async_setup_entry(
             CyberPowerPduSourceSensor(coordinator, description)
             for description in SOURCE_SENSORS
         )
+    # Environment sensors are only created when an env sensor is attached
+    if coordinator.data and coordinator.data.environment is not None:
+        entities.extend(
+            CyberPowerPduEnvironmentSensor(coordinator, description)
+            for description in ENVIRONMENT_SENSORS
+        )
     async_add_entities(entities)
 
 
@@ -216,6 +248,31 @@ class CyberPowerPduSourceSensor(CyberPowerPduEntity, SensorEntity):
             super().available
             and self.coordinator.data is not None
             and self.coordinator.data.source is not None
+            and self.native_value is not None
+        )
+
+
+class CyberPowerPduEnvironmentSensor(CyberPowerPduEntity, SensorEntity):
+    entity_description: EnvironmentSensorDescription
+
+    def __init__(self, coordinator, description: EnvironmentSensorDescription) -> None:
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_name = description.name
+        self._attr_unique_id = f"{coordinator.device_identifier}_env_{description.key}"
+
+    @property
+    def native_value(self) -> float | None:
+        if not self.coordinator.data or not self.coordinator.data.environment:
+            return None
+        return self.entity_description.value_fn(self.coordinator.data.environment)
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self.coordinator.data.environment is not None
             and self.native_value is not None
         )
 

@@ -76,6 +76,15 @@ EPDU2_ROLE = f"{EPDU2_IDENT}.1.0"
 EPDU2_SOURCE_CONFIG = f"{EPDU2_IDENT}.9.2.1"
 EPDU2_SOURCE_STATUS = f"{EPDU2_IDENT}.9.4.1"
 
+# Environment Sensor 2 branch (hardware 8) — table-based env sensor
+ENVIR2_BASE = "1.3.6.1.4.1.3808.1.1.8"
+ENVIR2_IDENT_TABLE_SIZE = f"{ENVIR2_BASE}.1.1.0"
+ENVIR2_TEMP_UNIT = f"{ENVIR2_BASE}.2.2.0"
+ENVIR2_TEMP_ENTRY = f"{ENVIR2_BASE}.2.3.1"
+ENVIR2_HUMID_ENTRY = f"{ENVIR2_BASE}.3.2.1"
+ENVIR2_CONTACT_TABLE_SIZE = f"{ENVIR2_BASE}.4.1.0"
+ENVIR2_CONTACT_ENTRY = f"{ENVIR2_BASE}.4.2.1"
+
 DEVICE_OIDS = {
     "name": f"{EPDU_IDENT}.1.0",
     "hardware": f"{EPDU_IDENT}.2.0",
@@ -242,6 +251,21 @@ class CyberPowerPduSource:
 
 
 @dataclass(slots=True, frozen=True)
+class CyberPowerPduEnvContact:
+    index: int
+    name: str | None
+    status: int | None  # 1=normal, 2=abnormal
+    normal_state: int | None  # 1=normalOpen, 2=normalClose
+
+
+@dataclass(slots=True, frozen=True)
+class CyberPowerPduEnvironment:
+    temperature: float | None  # °C or °F (scaled from 0.01)
+    humidity: float | None  # % (scaled from 0.01)
+    contacts: tuple[CyberPowerPduEnvContact, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
 class CyberPowerPduData:
     device: CyberPowerPduDevice
     outlets: tuple[CyberPowerPduOutlet, ...]
@@ -252,6 +276,7 @@ class CyberPowerPduData:
     power_factor: float | None
     energy: float | None
     source: CyberPowerPduSource | None = None
+    environment: CyberPowerPduEnvironment | None = None
 
     def outlet(self, index: int) -> CyberPowerPduOutlet | None:
         return next((outlet for outlet in self.outlets if outlet.index == index), None)
@@ -264,6 +289,7 @@ class CyberPowerPduClient:
         self._lock = asyncio.Lock()
         self._mib_branch = MIB_BRANCH_EPDU
         self._has_source = False
+        self._has_env = False
 
     async def async_close(self) -> None:
         if self._engine is not None:
@@ -307,6 +333,10 @@ class CyberPowerPduClient:
             if self._has_source:
                 source = await self._fetch_source_locked()
 
+            environment = None
+            if self._has_env:
+                environment = await self._fetch_environment_locked()
+
             return CyberPowerPduData(
                 device=device,
                 outlets=outlets,
@@ -317,6 +347,7 @@ class CyberPowerPduClient:
                 power_factor=_as_scaled_number(total_values.get(TOTAL_OIDS["power_factor"]), 100),
                 energy=_as_scaled_number(total_values.get(TOTAL_OIDS["energy"]), 10),
                 source=source,
+                environment=environment,
             )
 
     async def async_set_outlet_power(self, index: int, on: bool) -> None:
@@ -359,6 +390,7 @@ class CyberPowerPduClient:
             self._mib_branch = MIB_BRANCH_EPDU
             # Check for ePDU2 source capability (ATS PDUs like PDU44004/44005)
             await self._detect_source_capability()
+            await self._detect_env_capability()
             return epdu_device
 
         values = await self._get_many_locked(ATS_DEVICE_OIDS.values())
@@ -382,6 +414,30 @@ class CyberPowerPduClient:
                 self._has_source = True
         except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
             pass
+
+    async def _detect_env_capability(self) -> None:
+        """Probe envir2IdentTableSize to check for an attached environmental sensor."""
+        try:
+            values = await self._get_many_locked((ENVIR2_IDENT_TABLE_SIZE,))
+            size = _as_int(values.get(ENVIR2_IDENT_TABLE_SIZE))
+            if size is not None and size >= 1:
+                self._has_env = True
+        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
+            pass
+
+    async def _fetch_environment_locked(self) -> CyberPowerPduEnvironment | None:
+        """Fetch temperature, humidity, and contacts from envir2 branch."""
+        try:
+            oids = _env_status_oids()
+            values = await self._get_many_locked(oids)
+            contact_count = _env_contact_count(values)
+            if contact_count > 0:
+                values.update(await self._get_many_locked(_env_contact_oids(contact_count)))
+            return _build_environment(values)
+        except CyberPowerPduSnmpError as err:
+            if err.is_missing_oid:
+                self._has_env = False
+            return None
 
     async def _get_many_locked(self, oids: Iterable[str]) -> dict[str, Any | None]:
         results: dict[str, Any | None] = {}
@@ -729,6 +785,58 @@ def _build_source(values: dict[str, Any | None]) -> CyberPowerPduSource:
         power_supply_b_status=_as_int(v("power_supply_b_status")),
         redundancy_state=_as_int(v("redundancy_state")),
         preferred_source=_as_int(v("preferred_source")),
+    )
+
+
+def _env_contact_count(values: dict[str, Any | None]) -> int:
+    raw = values.get(f"{ENVIR2_CONTACT_TABLE_SIZE}")
+    count = _as_int(raw)
+    return count if count is not None else 0
+
+
+def _env_status_oids() -> tuple[str, ...]:
+    """Build OIDs for envir2 temp, humidity, and contact table size."""
+    return (
+        f"{ENVIR2_TEMP_ENTRY}.3.1",     # temperature
+        f"{ENVIR2_HUMID_ENTRY}.3.1",    # humidity
+        ENVIR2_CONTACT_TABLE_SIZE,       # contact table size
+    )
+
+
+_ENV_OID_MAP = {
+    "temperature": f"{ENVIR2_TEMP_ENTRY}.3.1",
+    "humidity": f"{ENVIR2_HUMID_ENTRY}.3.1",
+}
+
+
+def _env_contact_oids(count: int) -> tuple[str, ...]:
+    """Build OIDs for all env contacts (name, status, normalState per contact)."""
+    oids: list[str] = []
+    for index in range(1, count + 1):
+        oids.append(f"{ENVIR2_CONTACT_ENTRY}.4.{index}")   # name
+        oids.append(f"{ENVIR2_CONTACT_ENTRY}.5.{index}")   # status
+        oids.append(f"{ENVIR2_CONTACT_ENTRY}.6.{index}")   # normalState
+    return tuple(oids)
+
+
+def _build_environment(values: dict[str, Any | None]) -> CyberPowerPduEnvironment:
+    temperature = _as_scaled_number(values.get(_ENV_OID_MAP["temperature"]), 100)
+    humidity = _as_scaled_number(values.get(_ENV_OID_MAP["humidity"]), 100)
+    contact_count = _env_contact_count(values)
+
+    contacts: list[CyberPowerPduEnvContact] = []
+    for index in range(1, contact_count + 1):
+        contacts.append(CyberPowerPduEnvContact(
+            index=index,
+            name=_as_text(values.get(f"{ENVIR2_CONTACT_ENTRY}.4.{index}")),
+            status=_as_int(values.get(f"{ENVIR2_CONTACT_ENTRY}.5.{index}")),
+            normal_state=_as_int(values.get(f"{ENVIR2_CONTACT_ENTRY}.6.{index}")),
+        ))
+
+    return CyberPowerPduEnvironment(
+        temperature=temperature,
+        humidity=humidity,
+        contacts=tuple(contacts),
     )
 
 

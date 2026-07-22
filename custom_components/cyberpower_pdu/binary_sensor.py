@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
-    BinaryEntity,
+    BinarySensorEntity,
     BinarySensorEntityDescription,
 )
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -27,7 +27,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class CyberPowerEnvContactBinarySensor(CyberPowerPduEntity, BinaryEntity):
+class CyberPowerEnvContactBinarySensor(CyberPowerPduEntity, BinarySensorEntity):
     entity_description: BinarySensorEntityDescription
     _contact: CyberPowerPduEnvContact
 

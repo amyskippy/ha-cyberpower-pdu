@@ -33,6 +33,8 @@ from .const import (
     DEFAULT_SNMP_VERSION,
     DEFAULT_TIMEOUT,
     DOMAIN,
+    OUTLET_COMMAND_OFF,
+    OUTLET_COMMAND_ON,
     OUTLET_COMMAND_REBOOT,
 )
 from .snmp import (
@@ -51,6 +53,7 @@ class CyberPowerPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
     """Coordinator for the local/host PDU."""
 
     config_entry: ConfigEntry
+    _background_tasks: set[asyncio.Task[None]] = set()
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.config_entry = entry
@@ -81,7 +84,7 @@ class CyberPowerPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
         await self.client.async_power_cycle_outlet(index)
         await asyncio.sleep(1)
         await self.async_request_refresh()
-        _delayed_refresh(self, 10)
+        _delayed_refresh(self, 10, self._background_tasks)
 
     async def async_set_preferred_source(self, source: int) -> None:
         await self.client.async_set_preferred_source(source)
@@ -111,6 +114,8 @@ class CyberPowerChainedPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
     data exclusively for its own module index from ePDU2 tables.
     """
 
+    _background_tasks: set[asyncio.Task[None]] = set()
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -139,19 +144,20 @@ class CyberPowerChainedPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
             raise UpdateFailed(str(err)) from err
 
     async def async_set_outlet_power(self, index: int, on: bool) -> None:
-        await self.client.async_set_chained_outlet_power(
-            self.info.module_index, index, on
+        await self.client.async_set_chained_outlet_command(
+            self.info.module_index, index,
+            OUTLET_COMMAND_ON if on else OUTLET_COMMAND_OFF,
         )
         await asyncio.sleep(1)
         await self.async_request_refresh()
 
     async def async_power_cycle_outlet(self, index: int) -> None:
-        await self.client.async_set_chained_outlet_power(
+        await self.client.async_set_chained_outlet_command(
             self.info.module_index, index, OUTLET_COMMAND_REBOOT
         )
         await asyncio.sleep(1)
         await self.async_request_refresh()
-        _delayed_refresh(self, 10)
+        _delayed_refresh(self, 10, self._background_tasks)
 
     async def async_set_preferred_source(self, source: int) -> None:
         await self.client.async_set_chained_preferred_source(
@@ -171,13 +177,23 @@ class CyberPowerChainedPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
 def _delayed_refresh(
     coordinator: DataUpdateCoordinator,
     delay: int,
-) -> asyncio.Task:
-    """Create a task that sleeps then requests a coordinator refresh."""
-    async def _refresh() -> None:
-        await asyncio.sleep(delay)
-        await coordinator.async_request_refresh()
+    task_registry: set[asyncio.Task[None]],
+) -> asyncio.Task[None]:
+    """Create a task that sleeps then requests a coordinator refresh.
 
-    return coordinator.hass.async_create_task(_refresh())
+    The task is registered in *task_registry* so it is tracked and removed
+    when done, preventing orphan tasks from accumulating.
+    """
+    async def _refresh() -> None:
+        try:
+            await asyncio.sleep(delay)
+            await coordinator.async_request_refresh()
+        finally:
+            task_registry.discard(task)
+
+    task = coordinator.hass.async_create_task(_refresh())
+    task_registry.add(task)
+    return task
 
 
 def _client_config(entry: ConfigEntry) -> CyberPowerPduConfig:

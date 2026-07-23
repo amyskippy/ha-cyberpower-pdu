@@ -316,7 +316,7 @@ class CyberPowerPduData:
     current: float | None
     voltage: float | None
     power: int | None
-    apparent_power: int | None
+    apparent_power: float | None
     power_factor: float | None
     energy: float | None
     source: CyberPowerPduSource | None = None
@@ -430,7 +430,7 @@ class CyberPowerPduClient:
                 current=_as_scaled_number(total_values.get(TOTAL_OIDS["current"]), 10),
                 voltage=voltage,
                 power=_as_int(total_values.get(TOTAL_OIDS["power"])),
-                apparent_power=_as_int(total_values.get(TOTAL_OIDS["apparent_power"])),
+                apparent_power=_as_scaled_number(total_values.get(TOTAL_OIDS["apparent_power"]), 10),
                 power_factor=_as_scaled_number(total_values.get(TOTAL_OIDS["power_factor"]), 100),
                 energy=_as_scaled_number(total_values.get(TOTAL_OIDS["energy"]), 10),
                 source=source,
@@ -786,7 +786,7 @@ class CyberPowerPduClient:
             current=dev_status_current,
             voltage=dev_status_voltage,
             power=int(dev_status_power) if dev_status_power is not None else None,
-            apparent_power=int(dev_status_apparent_power) if dev_status_apparent_power is not None else None,
+            apparent_power=dev_status_apparent_power,
             power_factor=dev_status_power_factor,
             energy=dev_status_energy,
             source=source,

@@ -255,8 +255,6 @@ class CyberPowerPduOutlet:
     phase: int | None
     bank: int | None
     alarm: int | None
-    # For chained PDUs this is the SNMP table row index (may differ from index)
-    global_index: int | None = None
 
     @property
     def is_on(self) -> bool | None:
@@ -437,13 +435,13 @@ class CyberPowerPduClient:
             return await self._fetch_chained_pdu_data_locked(module_index)
 
     async def async_set_chained_outlet_power(
-        self, module_index: int, global_outlet_index: int, on: bool
+        self, module_index: int, local_outlet_index: int, on: bool
     ) -> None:
         """Control an outlet on a chained PDU."""
         command = OUTLET_COMMAND_ON if on else OUTLET_COMMAND_OFF
         async with self._lock:
-            # Column 3 = command in ePDU2OutletSwitchedControl
-            oid = f"{EPDU2_OUTLET_SWITCHED_CONTROL}.3.{global_outlet_index}"
+            # Control table is indexed by moduleIndex.outletNumber
+            oid = f"{EPDU2_OUTLET_SWITCHED_CONTROL}.3.{module_index}.{local_outlet_index}"
             await self._set_int_locked(oid, command)
 
     async def async_set_chained_preferred_source(
@@ -640,7 +638,6 @@ class CyberPowerPduClient:
                 phase=None,
                 bank=None,
                 alarm=None,
-                global_index=gi,
             ))
 
         # Fetch device info from ePDU2Ident entry

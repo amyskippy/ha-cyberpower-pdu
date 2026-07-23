@@ -139,27 +139,18 @@ class CyberPowerChainedPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
 
     async def async_set_outlet_power(self, index: int, on: bool) -> None:
         await self.client.async_set_chained_outlet_power(
-            self.info.module_index, self._global_outlet_index(index), on
+            self.info.module_index, index, on
         )
         await asyncio.sleep(1)
         await self.async_request_refresh()
 
     async def async_power_cycle_outlet(self, index: int) -> None:
         await self.client.async_set_chained_outlet_power(
-            self.info.module_index, self._global_outlet_index(index), OUTLET_COMMAND_REBOOT
+            self.info.module_index, index, OUTLET_COMMAND_REBOOT
         )
         await asyncio.sleep(1)
         await self.async_request_refresh()
         _delayed_refresh(self, 10)
-
-    def _global_outlet_index(self, local_index: int) -> int:
-        """Resolve a local outlet index to its global SNMP table index."""
-        if self.data:
-            outlet = self.data.outlet(local_index)
-            if outlet and outlet.global_index is not None:
-                return outlet.global_index
-        # Fallback: assume local == global (should not happen for chained PDUs)
-        return local_index
 
     async def async_set_preferred_source(self, source: int) -> None:
         await self.client.async_set_chained_preferred_source(

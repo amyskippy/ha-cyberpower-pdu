@@ -477,16 +477,15 @@ class CyberPowerPduClient:
         async with self._lock:
             return await self._fetch_chained_pdu_data_locked(module_index)
 
-    async def async_set_chained_outlet_power(
-        self, module_index: int, local_outlet_index: int, on: bool
+    async def async_set_chained_outlet_command(
+        self, module_index: int, local_outlet_index: int, command: int
     ) -> None:
-        """Control an outlet on a chained PDU.
+        """Send an arbitrary outlet command on a chained PDU.
 
         Writes ePDU2OutletSwitchedControlCommand (column 5 of the control table)
         using the sequential row index from the unified ePDU2 switched outlet table.
         For the chained PDU (module 2), rows are offset (e.g., 13..22).
         """
-        command = OUTLET_COMMAND_ON if on else OUTLET_COMMAND_OFF
         # Resolve local outlet index to its sequential row index (gi) in the unified table
         row_index = self._outlet_index_map.get(
             module_index, {}
@@ -494,6 +493,13 @@ class CyberPowerPduClient:
         async with self._lock:
             oid = f"{EPDU2_OUTLET_SWITCHED_CONTROL}.5.{row_index}"
             await self._set_int_locked(oid, command)
+
+    async def async_set_chained_outlet_power(
+        self, module_index: int, local_outlet_index: int, on: bool
+    ) -> None:
+        """Turn a chained PDU outlet on or off."""
+        command = OUTLET_COMMAND_ON if on else OUTLET_COMMAND_OFF
+        await self.async_set_chained_outlet_command(module_index, local_outlet_index, command)
 
     async def async_set_chained_preferred_source(
         self, module_index: int, source: int

@@ -259,3 +259,7 @@ class CyberPowerEnvironmentCoordinator(DataUpdateCoordinator[CyberPowerPduEnviro
     @property
     def device_name(self) -> str | None:
         return self._env_name
+
+    @property
+    def env_serial(self) -> str | None:
+        return self._env_serial

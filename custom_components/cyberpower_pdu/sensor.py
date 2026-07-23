@@ -297,7 +297,7 @@ class CyberPowerEnvironmentSensor(
             manufacturer="CyberPower",
             model="Environmental Sensor",
             name=self.coordinator.device_name or "Environmental Sensor",
-            serial_number=self.coordinator._env_serial,
+            serial_number=self.coordinator.env_serial,
         )
 
     @property

@@ -1053,8 +1053,12 @@ def _apparent_power(current: float | None, voltage: float | None) -> float | Non
 
 
 def _normalise_outlet_power(power: int | None, current: float | None) -> int | None:
-    if power == 0 and current is not None and current > 0:
+    if power is None:
         return None
+    if power == 0 and current is not None and current > 0:
+        # Firmware may report 0W while drawing current; treat as unreliable
+        # but still surface the reading so the sensor shows 0 rather than unavailable
+        pass
     return power
 
 

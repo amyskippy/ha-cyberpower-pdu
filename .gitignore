@@ -1,2 +1,12 @@
 __pycache__/
 *.py[cod]
+
+# IDE
+.idea/
+.vscode/
+
+# Python
+*.egg-info/
+dist/
+build/
+.eggs/

@@ -255,6 +255,8 @@ class CyberPowerPduOutlet:
     phase: int | None
     bank: int | None
     alarm: int | None
+    # For chained PDUs this is the SNMP table row index (may differ from index)
+    global_index: int | None = None
 
     @property
     def is_on(self) -> bool | None:
@@ -638,6 +640,7 @@ class CyberPowerPduClient:
                 phase=None,
                 bank=None,
                 alarm=None,
+                global_index=gi,
             ))
 
         # Fetch device info from ePDU2Ident entry

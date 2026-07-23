@@ -332,6 +332,8 @@ class CyberPowerPduClient:
         self._mib_branch = MIB_BRANCH_EPDU
         self._has_source = False
         self._has_env = False
+        # module_index -> {local_outlet_number: global_table_row}
+        self._outlet_index_map: dict[int, dict[int, int]] = {}
 
     async def async_close(self) -> None:
         if self._engine is not None:
@@ -437,11 +439,21 @@ class CyberPowerPduClient:
     async def async_set_chained_outlet_power(
         self, module_index: int, local_outlet_index: int, on: bool
     ) -> None:
-        """Control an outlet on a chained PDU."""
+        """Control an outlet on a chained PDU.
+
+        Uses the standard outlet control OID (ATS or ePDU) with the global
+        outlet row index from the ePDU2 switched outlet table.
+        """
         command = OUTLET_COMMAND_ON if on else OUTLET_COMMAND_OFF
+        # Resolve local outlet index to its global table row index
+        global_index = self._outlet_index_map.get(
+            module_index, {}
+        ).get(local_outlet_index, local_outlet_index)
         async with self._lock:
-            # Control table is indexed by moduleIndex.outletNumber
-            oid = f"{EPDU2_OUTLET_SWITCHED_CONTROL}.3.{module_index}.{local_outlet_index}"
+            if self._mib_branch == MIB_BRANCH_ATS:
+                oid = f"{ATS_OUTLET_CONTROL}.{ATS_OUTLET_CONTROL_COMMAND_COLUMN}.{global_index}"
+            else:
+                oid = f"{EPDU_OUTLET_CONTROL}.{OUTLET_CONTROL_COMMAND_COLUMN}.{global_index}"
             await self._set_int_locked(oid, command)
 
     async def async_set_chained_preferred_source(
@@ -603,6 +615,9 @@ class CyberPowerPduClient:
         outlet_count = len(local_to_global)
         if not outlet_count:
             outlet_count = DEFAULT_OUTLET_COUNT
+
+        # Cache the mapping for control operations
+        self._outlet_index_map[module_index] = local_to_global
 
         # Fetch outlet status data for all outlets belonging to this module
         # Columns: 4=name, 5=state, 6=commandPending

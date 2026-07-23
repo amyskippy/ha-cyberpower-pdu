@@ -105,6 +105,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: CyberPowerPduConfigEntr
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         await entry.runtime_data.async_close()
+        for chained_coord in _get_chained_coordinators(hass, entry):
+            await chained_coord._cancel_background_tasks()
     return unload_ok
 
 

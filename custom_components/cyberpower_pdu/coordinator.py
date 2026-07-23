@@ -53,10 +53,10 @@ class CyberPowerPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
     """Coordinator for the local/host PDU."""
 
     config_entry: ConfigEntry
-    _background_tasks: set[asyncio.Task[None]] = set()
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.config_entry = entry
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self.client = CyberPowerPduClient(_client_config(entry))
         scan_interval = entry.options.get(
             CONF_SCAN_INTERVAL,
@@ -92,11 +92,20 @@ class CyberPowerPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
         await self.async_request_refresh()
 
     async def async_close(self) -> None:
+        await self._cancel_background_tasks()
         await self.client.async_close()
 
     async def async_detect_chained_pdus(self) -> list[CyberPowerChainedPduInfo]:
         """Detect daisy-chained PDUs behind this host."""
         return await self.client.async_detect_chained_pdus()
+
+    async def _cancel_background_tasks(self) -> None:
+        """Cancel any pending delayed-refresh tasks."""
+        for task in self._background_tasks:
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
 
     @property
     def device_identifier(self) -> str:
@@ -114,8 +123,6 @@ class CyberPowerChainedPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
     data exclusively for its own module index from ePDU2 tables.
     """
 
-    _background_tasks: set[asyncio.Task[None]] = set()
-
     def __init__(
         self,
         hass: HomeAssistant,
@@ -124,6 +131,7 @@ class CyberPowerChainedPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
         parent_client: CyberPowerPduClient,
     ) -> None:
         self.config_entry = entry
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self.info = info
         self.client = parent_client
         scan_interval = entry.options.get(
@@ -165,6 +173,14 @@ class CyberPowerChainedPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
         )
         await asyncio.sleep(1)
         await self.async_request_refresh()
+
+    async def _cancel_background_tasks(self) -> None:
+        """Cancel any pending delayed-refresh tasks."""
+        for task in self._background_tasks:
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
 
     @property
     def device_identifier(self) -> str:

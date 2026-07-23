@@ -671,26 +671,41 @@ class CyberPowerPduClient:
         # Cache the mapping for control operations
         self._outlet_index_map[module_index] = local_to_global
 
-        # Fetch outlet status data for all outlets belonging to this module
-        # Columns: 4=name, 5=state, 6=commandPending
-        outlet_oids: list[str] = []
+        # Build a single combined OID list for outlet status, device identity,
+        # source status, and device-level power stats.
+        all_oids: list[str] = []
+
+        # Outlet status: 4=name, 5=state, 6=commandPending
         for local_num, gi in local_to_global.items():
-            outlet_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.4.{gi}")   # name
-            outlet_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.5.{gi}")   # state
-            outlet_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.6.{gi}")   # commandPending
+            all_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.4.{gi}")
+            all_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.5.{gi}")
+            all_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.6.{gi}")
+
+        # Device identity from ePDU2Ident entry
+        ident_base = EPDU2_IDENT_ENTRY
+        for col in (3, 6, 7, 9, 10):
+            all_oids.append(f"{ident_base}.{col}.{module_index}")
+
+        # Source status + preferred source config
+        all_oids.extend(_source_status_oids(module_index))
+
+        # Device-level power stats from ePDU2DeviceStatusEntry
+        ds_cols = (5, 9, 15, 16, 18)  # currentLoad, energy, apparentPower, powerFactor, powerLoad
+        for col in ds_cols:
+            all_oids.append(f"{EPDU2_DEVICE_STATUS_ENTRY}.{col}.{module_index}")
 
         try:
-            outlet_values = await self._get_many_locked(outlet_oids)
+            combined_values = await self._get_many_locked(all_oids)
         except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
-            outlet_values = {}
+            combined_values = {}
 
-        # Build outlets
+        # Build outlets from the combined values
         outlets: list[CyberPowerPduOutlet] = []
         for local_num, gi in sorted(local_to_global.items()):
-            name_raw = outlet_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.4.{gi}")
+            name_raw = combined_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.4.{gi}")
             name = _as_text(name_raw) or f"Outlet {local_num}"
-            state_raw = outlet_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.5.{gi}")
-            pending_raw = outlet_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.6.{gi}")
+            state_raw = combined_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.5.{gi}")
+            pending_raw = combined_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.6.{gi}")
 
             outlets.append(CyberPowerPduOutlet(
                 index=local_num,
@@ -707,78 +722,45 @@ class CyberPowerPduClient:
                 alarm=None,
             ))
 
-        # Fetch device info from ePDU2Ident entry
-        ident_base = f"{EPDU2_IDENT_ENTRY}"
-        dev_values = await self._get_many_locked((
-            f"{ident_base}.3.{module_index}",   # name
-            f"{ident_base}.6.{module_index}",   # hardwareRev
-            f"{ident_base}.7.{module_index}",   # firmwareRev
-            f"{ident_base}.9.{module_index}",   # modelName
-            f"{ident_base}.10.{module_index}",  # serialNumber
-        ))
-
+        # Build device from the combined values
         device = CyberPowerPduDevice(
             host=self._config.host,
             mib_branch=MIB_BRANCH_ATS,
-            name=_as_text(dev_values.get(f"{ident_base}.3.{module_index}")),
-            model=_as_text(dev_values.get(f"{ident_base}.9.{module_index}")),
-            serial=_as_text(dev_values.get(f"{ident_base}.10.{module_index}")),
-            firmware=_as_text(dev_values.get(f"{ident_base}.7.{module_index}")),
-            hardware=_as_text(dev_values.get(f"{ident_base}.6.{module_index}")),
+            name=_as_text(combined_values.get(f"{ident_base}.3.{module_index}")),
+            model=_as_text(combined_values.get(f"{ident_base}.9.{module_index}")),
+            serial=_as_text(combined_values.get(f"{ident_base}.10.{module_index}")),
+            firmware=_as_text(combined_values.get(f"{ident_base}.7.{module_index}")),
+            hardware=_as_text(combined_values.get(f"{ident_base}.6.{module_index}")),
             outlet_count=outlet_count,
             controlled_outlets=outlet_count,
             has_source=True,
             module_index=module_index,
         )
 
-        # Fetch source data for this module
-        source = None
-        try:
-            source_oids = _source_status_oids(module_index)
-            source_values = await self._get_many_locked(source_oids)
-            source = _build_source(source_values, module_index)
-        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
-            pass
+        # Build source from the combined values
+        source = _build_source(combined_values, module_index)
 
-        # Fetch device-level power stats from ePDU2DeviceStatus table
-        dev_status_current = None
-        dev_status_power = None
-        dev_status_apparent_power = None
-        dev_status_energy = None
-        dev_status_voltage = None
-        dev_status_power_factor = None
-        try:
-            ds_oids = (
-                f"{EPDU2_DEVICE_STATUS_ENTRY}.5.{module_index}",   # currentLoad (0.1A)
-                f"{EPDU2_DEVICE_STATUS_ENTRY}.9.{module_index}",   # energy (0.1 kWh)
-                f"{EPDU2_DEVICE_STATUS_ENTRY}.15.{module_index}",  # apparentPower (0.1 VA)
-                f"{EPDU2_DEVICE_STATUS_ENTRY}.16.{module_index}",  # powerFactor (0.01)
-                f"{EPDU2_DEVICE_STATUS_ENTRY}.18.{module_index}",  # powerLoad (0.1 W)
-            )
-            ds_values = await self._get_many_locked(ds_oids)
-            dev_status_current = _as_scaled_number(
-                ds_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.5.{module_index}"), 10
-            )
-            dev_status_energy = _as_scaled_number(
-                ds_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.9.{module_index}"), 10
-            )
-            dev_status_apparent_power = _as_scaled_number(
-                ds_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.15.{module_index}"), 10
-            )
-            dev_status_power_factor = _as_scaled_number(
-                ds_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.16.{module_index}"), 100
-            )
-            dev_status_power = _as_scaled_number(
-                ds_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.18.{module_index}"), 10
-            )
-            # Derive voltage from the selected source
-            if source is not None:
-                if source.selected_source == 1 and source.source_a_voltage is not None:
-                    dev_status_voltage = source.source_a_voltage
-                elif source.selected_source == 2 and source.source_b_voltage is not None:
-                    dev_status_voltage = source.source_b_voltage
-        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
-            pass
+        # Build device-level power stats from the combined values
+        dev_status_current = _as_scaled_number(
+            combined_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.5.{module_index}"), 10
+        )
+        dev_status_energy = _as_scaled_number(
+            combined_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.9.{module_index}"), 10
+        )
+        dev_status_apparent_power = _as_scaled_number(
+            combined_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.15.{module_index}"), 10
+        )
+        dev_status_power_factor = _as_scaled_number(
+            combined_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.16.{module_index}"), 100
+        )
+        dev_status_power = _as_scaled_number(
+            combined_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.18.{module_index}"), 10
+        )
+        dev_status_voltage: float | None = None
+        if source.selected_source == 1 and source.source_a_voltage is not None:
+            dev_status_voltage = source.source_a_voltage
+        elif source.selected_source == 2 and source.source_b_voltage is not None:
+            dev_status_voltage = source.source_b_voltage
 
         return CyberPowerPduData(
             device=device,

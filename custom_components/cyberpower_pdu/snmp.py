@@ -341,7 +341,7 @@ class CyberPowerPduClient:
     def __init__(self, config: CyberPowerPduConfig) -> None:
         self._config = config
         self._engine: SnmpEngine | None = None
-        self._transport: UdpTransportTarget | None = None
+        self._cached_transport: UdpTransportTarget | None = None
         self._lock = asyncio.Lock()
         self._mib_branch = MIB_BRANCH_EPDU
         self._has_source = False
@@ -353,7 +353,7 @@ class CyberPowerPduClient:
         if self._engine is not None:
             self._engine.close_dispatcher()
             self._engine = None
-        self._transport = None
+        self._cached_transport = None
 
     async def async_fetch_device_info(self) -> CyberPowerPduDevice:
         async with self._lock:
@@ -829,13 +829,13 @@ class CyberPowerPduClient:
         return self._engine
 
     async def _transport(self) -> UdpTransportTarget:
-        if self._transport is None:
-            self._transport = await UdpTransportTarget.create(
+        if self._cached_transport is None:
+            self._cached_transport = await UdpTransportTarget.create(
                 (self._config.host, self._config.port),
                 timeout=self._config.timeout,
                 retries=self._config.retries,
             )
-        return self._transport
+        return self._cached_transport
 
     def _context_data(self) -> ContextData:
         return ContextData(contextName=self._config.context_name or "")

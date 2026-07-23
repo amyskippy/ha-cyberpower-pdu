@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 import os
 from typing import Any
@@ -70,11 +70,40 @@ ATS_OUTLET_DEVICE = "1.3.6.1.4.1.3808.1.1.5.6.1"
 ATS_OUTLET_CONTROL = "1.3.6.1.4.1.3808.1.1.5.6.5.1"
 ATS_OUTLET_STATUS = "1.3.6.1.4.1.3808.1.1.5.6.3.1"
 
-# ATS PDU info (PDU44004, PDU44005)
+# ePDU2 branch — unified MIB tree used by ATS PDUs (PDU44004/44005) and daisy-chains
 EPDU2_IDENT = "1.3.6.1.4.1.3808.1.1.6"
 EPDU2_ROLE = f"{EPDU2_IDENT}.1.0"
+EPDU2_IDENT_TABLE_SIZE = f"{EPDU2_IDENT}.2.1.0"
+# ePDU2Ident table columns (indexed by module position):
+#   1=index, 2=moduleIndex, 3=name, 4=location, 5=contact,
+#   6=hardwareRev, 7=firmwareRev, 8=dateOfManufacture,
+#   9=modelName, 10=serialNumber, 11=indicator
+EPDU2_IDENT_ENTRY = f"{EPDU2_IDENT}.2.2.1"
+EPDU2_DEVICE_CONFIG_ENTRY = f"{EPDU2_IDENT}.3.2.1"
+# ePDU2DeviceConfigEntry columns:
+#   1=index, 2=moduleIndex, 3=name, 4=location, 5=contact,
+#   6=displayOrientation, 7=coldstartDelay,
+#   8=currentLowLoadThreshold, 9=currentNearOverloadThreshold,
+#   10=currentOverloadThreshold, 11=peakLoadReset, 12=energyReset,
+#   13=powerLowLoadThreshold, 14=powerNearOverloadThreshold,
+#   15=powerOverloadThreshold
+EPDU2_OUTLET_SWITCHED_CONFIG_ENTRY = f"{EPDU2_IDENT}.6.1.2.1"
+EPDU2_OUTLET_SWITCHED_STATUS_ENTRY = f"{EPDU2_IDENT}.6.1.3.1"
+# ePDU2OutletSwitchedStatusEntry columns:
+#   1=index, 2=moduleIndex, 3=number, 4=name,
+#   5=state, 6=commandPending
+EPDU2_OUTLET_SWITCHED_CONTROL = f"{EPDU2_IDENT}.6.1.5.1"
+# Column 3 = command (same as ePDU outlet control)
 EPDU2_SOURCE_CONFIG = f"{EPDU2_IDENT}.9.2.1"
 EPDU2_SOURCE_STATUS = f"{EPDU2_IDENT}.9.4.1"
+# ePDU2SourceConfigEntry columns:
+#   1=index, 2=moduleIndex, 3=preferredSource, ...
+# ePDU2SourceStatusEntry columns:
+#   1=index, 2=moduleIndex, 3=selectedSource, 4=nominalFrequency,
+#   5=sourceAVoltage, 6=sourceBVoltage, 7=sourceAFrequency, 8=sourceBFrequency,
+#   9=sourceAVolStatus, 10=sourceBVolStatus, 11=sourceAFreqStatus,
+#   12=sourceBFreqStatus, 13=phaseSync, 14=pwrSupplyAStatus,
+#   15=pwrSupplyBStatus, 16=redundancyState
 
 # Environment Sensor 2 branch (hardware 8) — table-based env sensor
 ENVIR2_BASE = "1.3.6.1.4.1.3808.1.1.8"
@@ -208,6 +237,8 @@ class CyberPowerPduDevice:
     outlet_count: int | None
     controlled_outlets: int | None
     has_source: bool = False
+    # For chained modules this holds the module index (2+) or 1 for local
+    module_index: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -282,6 +313,17 @@ class CyberPowerPduData:
         return next((outlet for outlet in self.outlets if outlet.index == index), None)
 
 
+@dataclass(slots=True, frozen=True)
+class CyberPowerChainedPduInfo:
+    """Summary info about a daisy-chained PDU discovered via ePDU2."""
+    module_index: int
+    name: str | None
+    model: str | None
+    serial: str | None
+    firmware: str | None
+    hardware: str | None
+
+
 class CyberPowerPduClient:
     def __init__(self, config: CyberPowerPduConfig) -> None:
         self._config = config
@@ -319,7 +361,7 @@ class CyberPowerPduClient:
                     apparent_power=None,
                     power_factor=None,
                     energy=None,
-            )
+                )
 
             total_values = await self._get_many_locked(TOTAL_OIDS.values())
             voltage = _as_scaled_number(total_values.get(TOTAL_OIDS["voltage"]), 10)
@@ -372,12 +414,50 @@ class CyberPowerPduClient:
             oid = f"{EPDU2_SOURCE_CONFIG}.3.1"
             await self._set_int_locked(oid, source)
 
+    async def async_detect_chained_pdus(self) -> list[CyberPowerChainedPduInfo]:
+        """Detect daisy-chained PDUs via ePDU2 ident table.
+
+        Returns a list of CyberPowerChainedPduInfo for each chained PDU (module index >= 2).
+        Module 1 is always the local/host PDU and is excluded.
+        """
+        async with self._lock:
+            return await self._detect_chained_pdus_locked()
+
+    async def async_fetch_chained_pdu_data(
+        self, module_index: int
+    ) -> CyberPowerPduData:
+        """Fetch data for a specific chained PDU module.
+
+        Reads device info, outlets, and source data from ePDU2 tables
+        filtered to the given module index.
+        """
+        async with self._lock:
+            return await self._fetch_chained_pdu_data_locked(module_index)
+
+    async def async_set_chained_outlet_power(
+        self, module_index: int, global_outlet_index: int, on: bool
+    ) -> None:
+        """Control an outlet on a chained PDU."""
+        command = OUTLET_COMMAND_ON if on else OUTLET_COMMAND_OFF
+        async with self._lock:
+            # Column 3 = command in ePDU2OutletSwitchedControl
+            oid = f"{EPDU2_OUTLET_SWITCHED_CONTROL}.3.{global_outlet_index}"
+            await self._set_int_locked(oid, command)
+
+    async def async_set_chained_preferred_source(
+        self, module_index: int, source: int
+    ) -> None:
+        """Set preferred power source for a chained PDU."""
+        async with self._lock:
+            oid = f"{EPDU2_SOURCE_CONFIG}.3.{module_index}"
+            await self._set_int_locked(oid, source)
+
     async def _fetch_source_locked(self) -> CyberPowerPduSource | None:
         """Fetch ATS source status from ePDU2 branch (module 1 = local PDU)."""
         try:
-            oids = _source_status_oids()
+            oids = _source_status_oids(1)
             values = await self._get_many_locked(oids)
-            return _build_source(values)
+            return _build_source(values, 1)
         except CyberPowerPduSnmpError as err:
             if err.is_missing_oid:
                 self._has_source = False
@@ -438,6 +518,173 @@ class CyberPowerPduClient:
             if err.is_missing_oid:
                 self._has_env = False
             return None
+
+    async def _detect_chained_pdus_locked(self) -> list[CyberPowerChainedPduInfo]:
+        """Read ePDU2IdentTableSize and ePDU2Ident entries to find chained PDUs."""
+        try:
+            values = await self._get_many_locked((EPDU2_IDENT_TABLE_SIZE,))
+            table_size = _as_int(values.get(EPDU2_IDENT_TABLE_SIZE))
+            if table_size is None or table_size <= 1:
+                return []
+        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
+            return []
+
+        # Fetch ident entries for all modules
+        ident_oids: list[str] = []
+        for idx in range(1, table_size + 1):
+            # Columns: 3=name, 6=hardwareRev, 7=firmwareRev, 9=modelName, 10=serialNumber
+            ident_oids.extend([
+                f"{EPDU2_IDENT_ENTRY}.3.{idx}",   # name
+                f"{EPDU2_IDENT_ENTRY}.6.{idx}",   # hardwareRev
+                f"{EPDU2_IDENT_ENTRY}.7.{idx}",   # firmwareRev
+                f"{EPDU2_IDENT_ENTRY}.9.{idx}",   # modelName
+                f"{EPDU2_IDENT_ENTRY}.10.{idx}",  # serialNumber
+            ])
+
+        try:
+            ident_values = await self._get_many_locked(ident_oids)
+        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
+            return []
+
+        # Now fetch outlet counts per module from device config
+        # Column 8=currentLowLoadThreshold gives us a proxy but we need actual outlet counts
+        # Instead, use ePDU2OutletSwitchedConfig which has moduleIndex
+        # We'll determine outlet counts later when fetching data
+        # For now just build basic info
+        chained: list[CyberPowerChainedPduInfo] = []
+        for idx in range(2, table_size + 1):
+            base = f"{EPDU2_IDENT_ENTRY}"
+            chained.append(CyberPowerChainedPduInfo(
+                module_index=idx,
+                name=_as_text(ident_values.get(f"{base}.3.{idx}")),
+                model=_as_text(ident_values.get(f"{base}.9.{idx}")),
+                serial=_as_text(ident_values.get(f"{base}.10.{idx}")),
+                firmware=_as_text(ident_values.get(f"{base}.7.{idx}")),
+                hardware=_as_text(ident_values.get(f"{base}.6.{idx}")),
+            ))
+
+        return chained
+
+    async def _fetch_chained_pdu_data_locked(
+        self, module_index: int
+    ) -> CyberPowerPduData:
+        """Fetch full data for a specific chained PDU module from ePDU2 tables."""
+
+        # Build a mapping of global_outlet_index -> local_outlet_number for this module
+        # by reading the switched outlet status table's moduleIndex and number columns
+        # First get the total switched outlet table size
+        try:
+            size_values = await self._get_many_locked((f"{EPDU2_IDENT}.6.1.1.0",))
+            total_switched = _as_int(size_values.get(f"{EPDU2_IDENT}.6.1.1.0"))
+            if total_switched is None or total_switched == 0:
+                total_switched = 0
+        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
+            total_switched = 0
+
+        # Read moduleIndex and number columns for all outlets to map them
+        module_map_oids: list[str] = []
+        for gi in range(1, total_switched + 1):
+            module_map_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.2.{gi}")  # moduleIndex
+            module_map_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.3.{gi}")  # number
+
+        try:
+            module_map_values = await self._get_many_locked(module_map_oids)
+        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
+            module_map_values = {}
+
+        # Build mapping: local_outlet_number -> global_outlet_index for this module
+        local_to_global: dict[int, int] = {}
+        for gi in range(1, total_switched + 1):
+            mi = _as_int(module_map_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.2.{gi}"))
+            num = _as_int(module_map_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.3.{gi}"))
+            if mi == module_index and num is not None:
+                local_to_global[num] = gi
+
+        outlet_count = len(local_to_global)
+        if not outlet_count:
+            outlet_count = DEFAULT_OUTLET_COUNT
+
+        # Fetch outlet status data for all outlets belonging to this module
+        # Columns: 4=name, 5=state, 6=commandPending
+        outlet_oids: list[str] = []
+        for local_num, gi in local_to_global.items():
+            outlet_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.4.{gi}")   # name
+            outlet_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.5.{gi}")   # state
+            outlet_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.6.{gi}")   # commandPending
+
+        try:
+            outlet_values = await self._get_many_locked(outlet_oids)
+        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
+            outlet_values = {}
+
+        # Build outlets
+        outlets: list[CyberPowerPduOutlet] = []
+        for local_num, gi in sorted(local_to_global.items()):
+            name_raw = outlet_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.4.{gi}")
+            name = _as_text(name_raw) or f"Outlet {local_num}"
+            state_raw = outlet_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.5.{gi}")
+            pending_raw = outlet_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.6.{gi}")
+
+            outlets.append(CyberPowerPduOutlet(
+                index=local_num,
+                name=name,
+                state=_as_int(state_raw),
+                command_pending=_as_pending(pending_raw),
+                current=None,
+                power=None,
+                apparent_power=None,
+                peak_power=None,
+                energy=None,
+                phase=None,
+                bank=None,
+                alarm=None,
+            ))
+
+        # Fetch device info from ePDU2Ident entry
+        ident_base = f"{EPDU2_IDENT_ENTRY}"
+        dev_values = await self._get_many_locked((
+            f"{ident_base}.3.{module_index}",   # name
+            f"{ident_base}.6.{module_index}",   # hardwareRev
+            f"{ident_base}.7.{module_index}",   # firmwareRev
+            f"{ident_base}.9.{module_index}",   # modelName
+            f"{ident_base}.10.{module_index}",  # serialNumber
+        ))
+
+        device = CyberPowerPduDevice(
+            host=self._config.host,
+            mib_branch=MIB_BRANCH_ATS,
+            name=_as_text(dev_values.get(f"{ident_base}.3.{module_index}")),
+            model=_as_text(dev_values.get(f"{ident_base}.9.{module_index}")),
+            serial=_as_text(dev_values.get(f"{ident_base}.10.{module_index}")),
+            firmware=_as_text(dev_values.get(f"{ident_base}.7.{module_index}")),
+            hardware=_as_text(dev_values.get(f"{ident_base}.6.{module_index}")),
+            outlet_count=outlet_count,
+            controlled_outlets=outlet_count,
+            has_source=True,
+            module_index=module_index,
+        )
+
+        # Fetch source data for this module
+        source = None
+        try:
+            source_oids = _source_status_oids(module_index)
+            source_values = await self._get_many_locked(source_oids)
+            source = _build_source(source_values, module_index)
+        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
+            pass
+
+        return CyberPowerPduData(
+            device=device,
+            outlets=tuple(outlets),
+            current=None,
+            voltage=None,
+            power=None,
+            apparent_power=None,
+            power_factor=None,
+            energy=None,
+            source=source,
+            environment=None,
+        )
 
     async def _get_many_locked(self, oids: Iterable[str]) -> dict[str, Any | None]:
         results: dict[str, Any | None] = {}
@@ -719,8 +966,8 @@ def _normalise_outlet_power(power: int | None, current: float | None) -> int | N
     return power
 
 
-def _source_status_oids() -> tuple[str, ...]:
-    """Build OIDs for source status table (module 1 = local PDU).
+def _source_status_oids(module_index: int = 1) -> tuple[str, ...]:
+    """Build OIDs for source status table for a given module.
 
     ePDU2SourceStatusEntry columns:
       1=index, 2=moduleIndex, 3=selectedSource, 4=nominalFrequency,
@@ -731,60 +978,45 @@ def _source_status_oids() -> tuple[str, ...]:
     ePDU2SourceConfigEntry column 3 = preferredSource
     """
     return (
-        f"{EPDU2_SOURCE_STATUS}.3.1",   # selectedSource
-        f"{EPDU2_SOURCE_STATUS}.5.1",   # sourceAVoltage
-        f"{EPDU2_SOURCE_STATUS}.6.1",   # sourceBVoltage
-        f"{EPDU2_SOURCE_STATUS}.7.1",   # sourceAFrequency
-        f"{EPDU2_SOURCE_STATUS}.8.1",   # sourceBFrequency
-        f"{EPDU2_SOURCE_STATUS}.9.1",   # sourceAVolStatus
-        f"{EPDU2_SOURCE_STATUS}.10.1",  # sourceBVolStatus
-        f"{EPDU2_SOURCE_STATUS}.11.1",  # sourceAFreqStatus
-        f"{EPDU2_SOURCE_STATUS}.12.1",  # sourceBFreqStatus
-        f"{EPDU2_SOURCE_STATUS}.13.1",  # phaseSync
-        f"{EPDU2_SOURCE_STATUS}.14.1",  # pwrSupplyAStatus
-        f"{EPDU2_SOURCE_STATUS}.15.1",  # pwrSupplyBStatus
-        f"{EPDU2_SOURCE_STATUS}.16.1",  # redundancyState
-        f"{EPDU2_SOURCE_CONFIG}.3.1",   # preferredSource
+        f"{EPDU2_SOURCE_STATUS}.3.{module_index}",   # selectedSource
+        f"{EPDU2_SOURCE_STATUS}.5.{module_index}",   # sourceAVoltage
+        f"{EPDU2_SOURCE_STATUS}.6.{module_index}",   # sourceBVoltage
+        f"{EPDU2_SOURCE_STATUS}.7.{module_index}",   # sourceAFrequency
+        f"{EPDU2_SOURCE_STATUS}.8.{module_index}",   # sourceBFrequency
+        f"{EPDU2_SOURCE_STATUS}.9.{module_index}",   # sourceAVolStatus
+        f"{EPDU2_SOURCE_STATUS}.10.{module_index}",  # sourceBVolStatus
+        f"{EPDU2_SOURCE_STATUS}.11.{module_index}",  # sourceAFreqStatus
+        f"{EPDU2_SOURCE_STATUS}.12.{module_index}",  # sourceBFreqStatus
+        f"{EPDU2_SOURCE_STATUS}.13.{module_index}",  # phaseSync
+        f"{EPDU2_SOURCE_STATUS}.14.{module_index}",  # pwrSupplyAStatus
+        f"{EPDU2_SOURCE_STATUS}.15.{module_index}",  # pwrSupplyBStatus
+        f"{EPDU2_SOURCE_STATUS}.16.{module_index}",  # redundancyState
+        f"{EPDU2_SOURCE_CONFIG}.3.{module_index}",   # preferredSource
     )
 
 
-_SOURCE_OID_MAP = {
-    "selected_source": f"{EPDU2_SOURCE_STATUS}.3.1",
-    "source_a_voltage": f"{EPDU2_SOURCE_STATUS}.5.1",
-    "source_b_voltage": f"{EPDU2_SOURCE_STATUS}.6.1",
-    "source_a_frequency": f"{EPDU2_SOURCE_STATUS}.7.1",
-    "source_b_frequency": f"{EPDU2_SOURCE_STATUS}.8.1",
-    "source_a_voltage_status": f"{EPDU2_SOURCE_STATUS}.9.1",
-    "source_b_voltage_status": f"{EPDU2_SOURCE_STATUS}.10.1",
-    "source_a_frequency_status": f"{EPDU2_SOURCE_STATUS}.11.1",
-    "source_b_frequency_status": f"{EPDU2_SOURCE_STATUS}.12.1",
-    "phase_sync": f"{EPDU2_SOURCE_STATUS}.13.1",
-    "power_supply_a_status": f"{EPDU2_SOURCE_STATUS}.14.1",
-    "power_supply_b_status": f"{EPDU2_SOURCE_STATUS}.15.1",
-    "redundancy_state": f"{EPDU2_SOURCE_STATUS}.16.1",
-    "preferred_source": f"{EPDU2_SOURCE_CONFIG}.3.1",
-}
-
-
-def _build_source(values: dict[str, Any | None]) -> CyberPowerPduSource:
-    def v(name: str) -> Any | None:
-        return values.get(_SOURCE_OID_MAP[name])
+def _build_source(
+    values: dict[str, Any | None],
+    module_index: int = 1,
+) -> CyberPowerPduSource:
+    status_base = EPDU2_SOURCE_STATUS
+    cfg_base = EPDU2_SOURCE_CONFIG
 
     return CyberPowerPduSource(
-        selected_source=_as_int(v("selected_source")),
-        source_a_voltage=_as_scaled_number(v("source_a_voltage"), 10),
-        source_b_voltage=_as_scaled_number(v("source_b_voltage"), 10),
-        source_a_frequency=_as_scaled_number(v("source_a_frequency"), 10),
-        source_b_frequency=_as_scaled_number(v("source_b_frequency"), 10),
-        source_a_voltage_status=_as_int(v("source_a_voltage_status")),
-        source_b_voltage_status=_as_int(v("source_b_voltage_status")),
-        source_a_frequency_status=_as_int(v("source_a_frequency_status")),
-        source_b_frequency_status=_as_int(v("source_b_frequency_status")),
-        phase_sync=_as_int(v("phase_sync")),
-        power_supply_a_status=_as_int(v("power_supply_a_status")),
-        power_supply_b_status=_as_int(v("power_supply_b_status")),
-        redundancy_state=_as_int(v("redundancy_state")),
-        preferred_source=_as_int(v("preferred_source")),
+        selected_source=_as_int(values.get(f"{status_base}.3.{module_index}")),
+        source_a_voltage=_as_scaled_number(values.get(f"{status_base}.5.{module_index}"), 10),
+        source_b_voltage=_as_scaled_number(values.get(f"{status_base}.6.{module_index}"), 10),
+        source_a_frequency=_as_scaled_number(values.get(f"{status_base}.7.{module_index}"), 10),
+        source_b_frequency=_as_scaled_number(values.get(f"{status_base}.8.{module_index}"), 10),
+        source_a_voltage_status=_as_int(values.get(f"{status_base}.9.{module_index}")),
+        source_b_voltage_status=_as_int(values.get(f"{status_base}.10.{module_index}")),
+        source_a_frequency_status=_as_int(values.get(f"{status_base}.11.{module_index}")),
+        source_b_frequency_status=_as_int(values.get(f"{status_base}.12.{module_index}")),
+        phase_sync=_as_int(values.get(f"{status_base}.13.{module_index}")),
+        power_supply_a_status=_as_int(values.get(f"{status_base}.14.{module_index}")),
+        power_supply_b_status=_as_int(values.get(f"{status_base}.15.{module_index}")),
+        redundancy_state=_as_int(values.get(f"{status_base}.16.{module_index}")),
+        preferred_source=_as_int(values.get(f"{cfg_base}.3.{module_index}")),
     )
 
 

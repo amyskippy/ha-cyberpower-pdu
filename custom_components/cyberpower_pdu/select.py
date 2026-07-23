@@ -3,8 +3,8 @@ from __future__ import annotations
 from homeassistant.components.select import SelectEntity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import CyberPowerPduConfigEntry
-from .entity import CyberPowerPduEntity
+from . import CyberPowerPduConfigEntry, _get_chained_coordinators
+from .entity import AnyCoordinator, CyberPowerPduEntity
 
 SOURCE_OPTIONS = {1: "Source A", 2: "Source B", 3: "None"}
 SOURCE_OPTION_VALUES = {"Source A": 1, "Source B": 2, "None": 3}
@@ -17,8 +17,17 @@ async def async_setup_entry(
 ) -> None:
     coordinator = entry.runtime_data
     entities: list[SelectEntity] = []
+
+    # Main coordinator preferred source
     if coordinator.data and coordinator.data.source is not None:
         entities.append(CyberPowerPreferredSourceSelect(coordinator))
+
+    # Chained PDU preferred sources
+    chained = _get_chained_coordinators(hass, entry)
+    for chained_coord in chained:
+        if chained_coord.data and chained_coord.data.source is not None:
+            entities.append(CyberPowerPreferredSourceSelect(chained_coord))
+
     async_add_entities(entities)
 
 
@@ -28,7 +37,7 @@ class CyberPowerPreferredSourceSelect(CyberPowerPduEntity, SelectEntity):
     _attr_translation_key = "preferred_source"
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator) -> None:
+    def __init__(self, coordinator: AnyCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.device_identifier}_preferred_source"
 
@@ -52,3 +61,4 @@ class CyberPowerPreferredSourceSelect(CyberPowerPduEntity, SelectEntity):
         if value is None:
             return
         await self.coordinator.async_set_preferred_source(value)
+

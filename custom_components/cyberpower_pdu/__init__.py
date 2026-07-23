@@ -1,13 +1,32 @@
 from __future__ import annotations
 
+import logging
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN, PLATFORMS
-from .coordinator import CyberPowerPduCoordinator
+from .coordinator import (
+    CyberPowerChainedPduCoordinator,
+    CyberPowerPduCoordinator,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
 
 type CyberPowerPduConfigEntry = ConfigEntry[CyberPowerPduCoordinator]
+
+
+def _get_chained_coordinators(
+    hass: HomeAssistant,
+    entry: CyberPowerPduConfigEntry,
+) -> list[CyberPowerChainedPduCoordinator]:
+    """Return the chained PDU coordinators for a config entry."""
+    domain_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if domain_data is None:
+        return []
+    return domain_data.get("chained_coordinators", [])
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -25,6 +44,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: CyberPowerPduConfigEntry
     entry.runtime_data = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     _remove_removed_entities(hass, entry)
+
+    # Detect daisy-chained PDUs
+    chained_infos = await coordinator.async_detect_chained_pdus()
+    chained_coordinators: list[CyberPowerChainedPduCoordinator] = []
+    for info in chained_infos:
+        chained_coord = CyberPowerChainedPduCoordinator(hass, entry, info, coordinator.client)
+        await chained_coord.async_config_entry_first_refresh()
+        chained_coordinators.append(chained_coord)
+        _LOGGER.info(
+            "Discovered chained PDU %s (%s, serial=%s) at module %d",
+            info.name or info.model,
+            info.model,
+            info.serial,
+            info.module_index,
+        )
+
+    # Store chained coordinators in hass.data for platform access
+    if DOMAIN not in hass.data:
+        hass.data[DOMAIN] = {}
+    hass.data[DOMAIN][entry.entry_id] = {
+        "coordinator": coordinator,
+        "chained_coordinators": chained_coordinators,
+    }
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _remove_removed_entities(hass, entry)
     return True

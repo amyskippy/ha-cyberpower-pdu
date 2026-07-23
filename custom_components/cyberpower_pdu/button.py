@@ -5,8 +5,8 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers import entity_registry as er
 
-from . import CyberPowerPduConfigEntry
-from .entity import CyberPowerPduEntity
+from . import CyberPowerPduConfigEntry, _get_chained_coordinators
+from .entity import AnyCoordinator, CyberPowerPduEntity
 
 
 async def async_setup_entry(
@@ -18,11 +18,23 @@ async def async_setup_entry(
     _remove_consolidated_button(hass, entry)
     _categorize_cycle_buttons(hass, entry)
     entities: list[ButtonEntity] = []
+
+    # Main coordinator outlets
     if coordinator.data:
         entities.extend(
             CyberPowerOutletPowerCycleButton(coordinator, outlet.index, outlet.name)
             for outlet in coordinator.data.outlets
         )
+
+    # Chained PDU outlets
+    chained = _get_chained_coordinators(hass, entry)
+    for chained_coord in chained:
+        if chained_coord.data:
+            entities.extend(
+                CyberPowerOutletPowerCycleButton(chained_coord, outlet.index, outlet.name)
+                for outlet in chained_coord.data.outlets
+            )
+
     async_add_entities(entities)
     _categorize_cycle_buttons(hass, entry)
 
@@ -32,7 +44,7 @@ class CyberPowerOutletPowerCycleButton(CyberPowerPduEntity, ButtonEntity):
     _attr_entity_category = EntityCategory.CONFIG
     _attr_entity_registry_enabled_default = False
 
-    def __init__(self, coordinator, index: int, outlet_name: str) -> None:
+    def __init__(self, coordinator: AnyCoordinator, index: int, outlet_name: str) -> None:
         super().__init__(coordinator)
         self._index = index
         self._attr_name = f"{outlet_name} Power Cycle"
@@ -87,3 +99,4 @@ def _categorize_cycle_buttons(hass, entry: CyberPowerPduConfigEntry) -> None:
                 entity_entry.entity_id,
                 entity_category=EntityCategory.CONFIG,
             )
+

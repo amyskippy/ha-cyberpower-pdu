@@ -21,8 +21,8 @@ from homeassistant.const import (
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers import entity_registry as er
 
-from . import CyberPowerPduConfigEntry
-from .entity import CyberPowerPduEntity
+from . import CyberPowerPduConfigEntry, _get_chained_coordinators
+from .entity import AnyCoordinator, CyberPowerPduEntity
 from .snmp import CyberPowerPduData, CyberPowerPduEnvironment, CyberPowerPduSource
 
 SOURCE_SELECTED_OPTIONS = {1: "Source A", 2: "Source B", 3: "None"}
@@ -189,28 +189,41 @@ async def async_setup_entry(
 ) -> None:
     coordinator = entry.runtime_data
     _remove_legacy_outlet_sensors(hass, entry)
-    entities = [
+    entities: list[SensorEntity] = []
+
+    # Main coordinator sensors
+    entities.extend(
         CyberPowerPduSensor(coordinator, description) for description in PDU_SENSORS
-    ]
-    # Source sensors are only created when the device exposes ATS source data
+    )
     if coordinator.data and coordinator.data.source is not None:
         entities.extend(
             CyberPowerPduSourceSensor(coordinator, description)
             for description in SOURCE_SENSORS
         )
-    # Environment sensors are only created when an env sensor is attached
     if coordinator.data and coordinator.data.environment is not None:
         entities.extend(
             CyberPowerPduEnvironmentSensor(coordinator, description)
             for description in ENVIRONMENT_SENSORS
         )
+
+    # Chained PDU sensors
+    chained = _get_chained_coordinators(hass, entry)
+    for chained_coord in chained:
+        if chained_coord.data:
+            # Only add source sensors for chained PDUs (they have no power/current/voltage)
+            if chained_coord.data.source is not None:
+                entities.extend(
+                    CyberPowerPduSourceSensor(chained_coord, description)
+                    for description in SOURCE_SENSORS
+                )
+
     async_add_entities(entities)
 
 
 class CyberPowerPduSensor(CyberPowerPduEntity, SensorEntity):
     entity_description: PduSensorDescription
 
-    def __init__(self, coordinator, description: PduSensorDescription) -> None:
+    def __init__(self, coordinator: AnyCoordinator, description: PduSensorDescription) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_name = description.name
@@ -230,7 +243,7 @@ class CyberPowerPduSensor(CyberPowerPduEntity, SensorEntity):
 class CyberPowerPduSourceSensor(CyberPowerPduEntity, SensorEntity):
     entity_description: SourceSensorDescription
 
-    def __init__(self, coordinator, description: SourceSensorDescription) -> None:
+    def __init__(self, coordinator: AnyCoordinator, description: SourceSensorDescription) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_name = description.name
@@ -255,7 +268,9 @@ class CyberPowerPduSourceSensor(CyberPowerPduEntity, SensorEntity):
 class CyberPowerPduEnvironmentSensor(CyberPowerPduEntity, SensorEntity):
     entity_description: EnvironmentSensorDescription
 
-    def __init__(self, coordinator, description: EnvironmentSensorDescription) -> None:
+    def __init__(
+        self, coordinator: AnyCoordinator, description: EnvironmentSensorDescription
+    ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_name = description.name
@@ -292,3 +307,4 @@ def _is_legacy_outlet_sensor(unique_id: str | None) -> bool:
         and "_outlet_" in unique_id
         and any(unique_id.endswith(f"_{key}") for key in LEGACY_OUTLET_SENSOR_KEYS)
     )
+

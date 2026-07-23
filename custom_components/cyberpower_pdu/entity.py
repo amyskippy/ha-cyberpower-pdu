@@ -4,13 +4,16 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DEVICE_NAME, DOMAIN
-from .coordinator import CyberPowerPduCoordinator
+from .coordinator import CyberPowerChainedPduCoordinator, CyberPowerPduCoordinator
+from .snmp import CyberPowerPduData
+
+AnyCoordinator = CyberPowerPduCoordinator | CyberPowerChainedPduCoordinator
 
 
-class CyberPowerPduEntity(CoordinatorEntity[CyberPowerPduCoordinator]):
+class CyberPowerPduEntity(CoordinatorEntity[AnyCoordinator]):
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator: CyberPowerPduCoordinator) -> None:
+    def __init__(self, coordinator: AnyCoordinator) -> None:
         super().__init__(coordinator)
 
     @property

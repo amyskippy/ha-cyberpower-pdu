@@ -33,13 +33,22 @@ from .const import (
     DEFAULT_SNMP_VERSION,
     DEFAULT_TIMEOUT,
     DOMAIN,
+    OUTLET_COMMAND_REBOOT,
 )
-from .snmp import CyberPowerPduClient, CyberPowerPduConfig, CyberPowerPduData, CyberPowerPduError
+from .snmp import (
+    CyberPowerChainedPduInfo,
+    CyberPowerPduClient,
+    CyberPowerPduConfig,
+    CyberPowerPduData,
+    CyberPowerPduError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class CyberPowerPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
+    """Coordinator for the local/host PDU."""
+
     config_entry: ConfigEntry
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -71,7 +80,7 @@ class CyberPowerPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
         await self.client.async_power_cycle_outlet(index)
         await asyncio.sleep(1)
         await self.async_request_refresh()
-        self.hass.async_create_task(self._async_delayed_refresh(10))
+        _delayed_refresh(self, 10)
 
     async def async_set_preferred_source(self, source: int) -> None:
         await self.client.async_set_preferred_source(source)
@@ -81,9 +90,9 @@ class CyberPowerPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
     async def async_close(self) -> None:
         await self.client.async_close()
 
-    async def _async_delayed_refresh(self, delay: int) -> None:
-        await asyncio.sleep(delay)
-        await self.async_request_refresh()
+    async def async_detect_chained_pdus(self) -> list[CyberPowerChainedPduInfo]:
+        """Detect daisy-chained PDUs behind this host."""
+        return await self.client.async_detect_chained_pdus()
 
     @property
     def device_identifier(self) -> str:
@@ -92,6 +101,82 @@ class CyberPowerPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
         if self.data and self.data.device.serial:
             return self.data.device.serial
         return self.config_entry.entry_id
+
+
+class CyberPowerChainedPduCoordinator(DataUpdateCoordinator[CyberPowerPduData]):
+    """Coordinator for a daisy-chained PDU module.
+
+    Shares the same SNMP client as the host coordinator but reads
+    data exclusively for its own module index from ePDU2 tables.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        info: CyberPowerChainedPduInfo,
+        parent_client: CyberPowerPduClient,
+    ) -> None:
+        self.config_entry = entry
+        self.info = info
+        self.client = parent_client
+        scan_interval = entry.options.get(
+            CONF_SCAN_INTERVAL,
+            entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+        )
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_chained_{info.module_index}",
+            update_interval=timedelta(seconds=scan_interval),
+        )
+
+    async def _async_update_data(self) -> CyberPowerPduData:
+        try:
+            return await self.client.async_fetch_chained_pdu_data(self.info.module_index)
+        except CyberPowerPduError as err:
+            raise UpdateFailed(str(err)) from err
+
+    async def async_set_outlet_power(self, index: int, on: bool) -> None:
+        await self.client.async_set_chained_outlet_power(
+            self.info.module_index, index, on
+        )
+        await asyncio.sleep(1)
+        await self.async_request_refresh()
+
+    async def async_power_cycle_outlet(self, index: int) -> None:
+        await self.client.async_set_chained_outlet_power(
+            self.info.module_index, index, OUTLET_COMMAND_REBOOT
+        )
+        await asyncio.sleep(1)
+        await self.async_request_refresh()
+        _delayed_refresh(self, 10)
+
+    async def async_set_preferred_source(self, source: int) -> None:
+        await self.client.async_set_chained_preferred_source(
+            self.info.module_index, source
+        )
+        await asyncio.sleep(1)
+        await self.async_request_refresh()
+
+    @property
+    def device_identifier(self) -> str:
+        serial = self.info.serial
+        if serial:
+            return f"{serial}_module{self.info.module_index}"
+        return f"chained_module{self.info.module_index}_{self.config_entry.entry_id}"
+
+
+def _delayed_refresh(
+    coordinator: DataUpdateCoordinator,
+    delay: int,
+) -> asyncio.Task:
+    """Create a task that sleeps then requests a coordinator refresh."""
+    async def _refresh() -> None:
+        await asyncio.sleep(delay)
+        await coordinator.async_request_refresh()
+
+    return coordinator.hass.async_create_task(_refresh())
 
 
 def _client_config(entry: ConfigEntry) -> CyberPowerPduConfig:

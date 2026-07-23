@@ -23,7 +23,7 @@ class CyberPowerPduEntity(CoordinatorEntity[AnyCoordinator]):
         return DeviceInfo(
             identifiers={(DOMAIN, self.coordinator.device_identifier)},
             manufacturer="CyberPower",
-            model=(device.model if device else None) or "PDU41001",
+            model=device.model if device else None,
             name=(device.name if device else None) or DEVICE_NAME,
             serial_number=device.serial if device else None,
             sw_version=device.firmware if device else None,

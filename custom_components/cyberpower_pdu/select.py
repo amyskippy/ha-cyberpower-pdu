@@ -34,8 +34,8 @@ async def async_setup_entry(
 class CyberPowerPreferredSourceSelect(CyberPowerPduEntity, SelectEntity):
     _attr_current_option = None
     _attr_options = list(SOURCE_OPTIONS.values())
-    _attr_translation_key = "preferred_source"
     _attr_has_entity_name = True
+    _attr_name = "Preferred Source"
 
     def __init__(self, coordinator: AnyCoordinator) -> None:
         super().__init__(coordinator)

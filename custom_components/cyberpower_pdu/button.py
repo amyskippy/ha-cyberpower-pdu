@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
 from homeassistant.helpers.entity import EntityCategory
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers import entity_registry as er
 
@@ -10,7 +11,7 @@ from .entity import AnyCoordinator, CyberPowerPduEntity
 
 
 async def async_setup_entry(
-    hass,
+    hass: HomeAssistant,
     entry: CyberPowerPduConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:

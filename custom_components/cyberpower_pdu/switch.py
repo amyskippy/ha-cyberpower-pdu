@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import CyberPowerPduConfigEntry, _get_chained_coordinators
@@ -11,7 +12,7 @@ from .entity import AnyCoordinator, CyberPowerPduEntity
 
 
 async def async_setup_entry(
-    hass,
+    hass: HomeAssistant,
     entry: CyberPowerPduConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from homeassistant.components.select import SelectEntity
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import CyberPowerPduConfigEntry, _get_chained_coordinators
@@ -11,7 +12,7 @@ SOURCE_OPTION_VALUES = {"Source A": 1, "Source B": 2, "None": 3}
 
 
 async def async_setup_entry(
-    hass,
+    hass: HomeAssistant,
     entry: CyberPowerPduConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:

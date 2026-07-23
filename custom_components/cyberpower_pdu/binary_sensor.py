@@ -37,14 +37,14 @@ class CyberPowerEnvContactBinarySensor(
     CoordinatorEntity[CyberPowerEnvironmentCoordinator], BinarySensorEntity
 ):
     entity_description: BinarySensorEntityDescription
-    _contact: CyberPowerPduEnvContact
+    _contact_index: int
     _attr_has_entity_name = True
 
     def __init__(
         self, coordinator: CyberPowerEnvironmentCoordinator, contact: CyberPowerPduEnvContact,
     ) -> None:
         super().__init__(coordinator)
-        self._contact = contact
+        self._contact_index = contact.index
         name = contact.name or f"Contact {contact.index}"
         self._attr_name = name
         self._attr_unique_id = f"{coordinator.device_identifier}_contact_{contact.index}"
@@ -73,7 +73,7 @@ class CyberPowerEnvContactBinarySensor(
             (
                 c
                 for c in self.coordinator.data.contacts
-                if c.index == self._contact.index
+                if c.index == self._contact_index
             ),
             None,
         )

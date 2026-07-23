@@ -209,7 +209,10 @@ async def async_setup_entry(
     chained = _get_chained_coordinators(hass, entry)
     for chained_coord in chained:
         if chained_coord.data:
-            # Only add source sensors for chained PDUs (they have no power/current/voltage)
+            entities.extend(
+                CyberPowerPduSensor(chained_coord, description)
+                for description in PDU_SENSORS
+            )
             if chained_coord.data.source is not None:
                 entities.extend(
                     CyberPowerPduSourceSensor(chained_coord, description)

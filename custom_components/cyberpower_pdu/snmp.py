@@ -87,6 +87,13 @@ EPDU2_DEVICE_CONFIG_ENTRY = f"{EPDU2_IDENT}.3.2.1"
 #   10=currentOverloadThreshold, 11=peakLoadReset, 12=energyReset,
 #   13=powerLowLoadThreshold, 14=powerNearOverloadThreshold,
 #   15=powerOverloadThreshold
+EPDU2_DEVICE_STATUS_ENTRY = f"{EPDU2_IDENT}.3.4.1"
+# ePDU2DeviceStatusEntry columns:
+#   1=index, 2=moduleIndex, 3=name, 4=loadState, 5=currentLoad,
+#   6=currentPeakLoad, 7=peakLoadTimestamp, 8=peakLoadStartTime,
+#   9=energy, 10=energyStartTime, 11=commandPending, 12=pwrSupplyAlarm,
+#   13=pwrSupply1Status, 14=pwrSupply2Status, 15=apparentPower,
+#   16=powerFactor, 17=roleType, 18=powerLoad
 EPDU2_OUTLET_SWITCHED_CONFIG_ENTRY = f"{EPDU2_IDENT}.6.1.2.1"
  # ePDU2OutletSwitchedConfigEntry columns:
 #   1=index, 2=moduleIndex, 3=number, 4=name,
@@ -725,15 +732,55 @@ class CyberPowerPduClient:
         except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
             pass
 
+        # Fetch device-level power stats from ePDU2DeviceStatus table
+        dev_status_current = None
+        dev_status_power = None
+        dev_status_apparent_power = None
+        dev_status_energy = None
+        dev_status_voltage = None
+        dev_status_power_factor = None
+        try:
+            ds_oids = (
+                f"{EPDU2_DEVICE_STATUS_ENTRY}.5.{module_index}",   # currentLoad (0.1A)
+                f"{EPDU2_DEVICE_STATUS_ENTRY}.9.{module_index}",   # energy (0.1 kWh)
+                f"{EPDU2_DEVICE_STATUS_ENTRY}.15.{module_index}",  # apparentPower (0.1 VA)
+                f"{EPDU2_DEVICE_STATUS_ENTRY}.16.{module_index}",  # powerFactor (0.01)
+                f"{EPDU2_DEVICE_STATUS_ENTRY}.18.{module_index}",  # powerLoad (0.1 W)
+            )
+            ds_values = await self._get_many_locked(ds_oids)
+            dev_status_current = _as_scaled_number(
+                ds_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.5.{module_index}"), 10
+            )
+            dev_status_energy = _as_scaled_number(
+                ds_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.9.{module_index}"), 10
+            )
+            dev_status_apparent_power = _as_scaled_number(
+                ds_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.15.{module_index}"), 10
+            )
+            dev_status_power_factor = _as_scaled_number(
+                ds_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.16.{module_index}"), 100
+            )
+            dev_status_power = _as_scaled_number(
+                ds_values.get(f"{EPDU2_DEVICE_STATUS_ENTRY}.18.{module_index}"), 10
+            )
+            # Derive voltage from the selected source
+            if source is not None:
+                if source.selected_source == 1 and source.source_a_voltage is not None:
+                    dev_status_voltage = source.source_a_voltage
+                elif source.selected_source == 2 and source.source_b_voltage is not None:
+                    dev_status_voltage = source.source_b_voltage
+        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
+            pass
+
         return CyberPowerPduData(
             device=device,
             outlets=tuple(outlets),
-            current=None,
-            voltage=None,
-            power=None,
-            apparent_power=None,
-            power_factor=None,
-            energy=None,
+            current=dev_status_current,
+            voltage=dev_status_voltage,
+            power=int(dev_status_power) if dev_status_power is not None else None,
+            apparent_power=int(dev_status_apparent_power) if dev_status_apparent_power is not None else None,
+            power_factor=dev_status_power_factor,
+            energy=dev_status_energy,
             source=source,
             environment=None,
         )

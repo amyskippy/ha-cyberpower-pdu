@@ -9,6 +9,7 @@ from homeassistant.helpers import entity_registry as er
 from .const import DOMAIN, PLATFORMS
 from .coordinator import (
     CyberPowerChainedPduCoordinator,
+    CyberPowerEnvironmentCoordinator,
     CyberPowerPduCoordinator,
 )
 
@@ -27,6 +28,17 @@ def _get_chained_coordinators(
     if domain_data is None:
         return []
     return domain_data.get("chained_coordinators", [])
+
+
+def _get_environment_coordinator(
+    hass: HomeAssistant,
+    entry: CyberPowerPduConfigEntry,
+) -> CyberPowerEnvironmentCoordinator | None:
+    """Return the environment sensor coordinator for a config entry, if any."""
+    domain_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if domain_data is None:
+        return None
+    return domain_data.get("environment_coordinator")
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -63,9 +75,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: CyberPowerPduConfigEntry
     # Store chained coordinators in hass.data for platform access
     if DOMAIN not in hass.data:
         hass.data[DOMAIN] = {}
+
+    # Detect attached environmental sensor
+    env_coord: CyberPowerEnvironmentCoordinator | None = None
+    env_name, env_serial = await coordinator.client.async_detect_environment()
+    if env_name or env_serial:
+        env_coord = CyberPowerEnvironmentCoordinator(
+            hass, entry, coordinator.client, env_name, env_serial
+        )
+        await env_coord.async_config_entry_first_refresh()
+        _LOGGER.info(
+            "Discovered environmental sensor %s (serial=%s)",
+            env_name or "unknown",
+            env_serial,
+        )
+
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
         "chained_coordinators": chained_coordinators,
+        "environment_coordinator": env_coord,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

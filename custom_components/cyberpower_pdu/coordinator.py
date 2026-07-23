@@ -40,6 +40,7 @@ from .snmp import (
     CyberPowerPduClient,
     CyberPowerPduConfig,
     CyberPowerPduData,
+    CyberPowerPduEnvironment,
     CyberPowerPduError,
 )
 
@@ -195,3 +196,50 @@ def _client_config(entry: ConfigEntry) -> CyberPowerPduConfig:
         timeout=float(data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)),
         retries=int(data.get(CONF_RETRIES, DEFAULT_RETRIES)),
     )
+
+
+class CyberPowerEnvironmentCoordinator(DataUpdateCoordinator[CyberPowerPduEnvironment]):
+    """Coordinator for an attached environmental sensor.
+
+    Shares the same SNMP client as the host coordinator but presents
+    the sensor as its own device in Home Assistant.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        parent_client: CyberPowerPduClient,
+        env_name: str | None,
+        env_serial: str | None,
+    ) -> None:
+        self.config_entry = entry
+        self.client = parent_client
+        self._env_name = env_name
+        self._env_serial = env_serial
+        scan_interval = entry.options.get(
+            CONF_SCAN_INTERVAL,
+            entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+        )
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_environment",
+            update_interval=timedelta(seconds=scan_interval),
+        )
+
+    async def _async_update_data(self) -> CyberPowerPduEnvironment:
+        try:
+            return await self.client.async_fetch_environment()
+        except CyberPowerPduError as err:
+            raise UpdateFailed(str(err)) from err
+
+    @property
+    def device_identifier(self) -> str:
+        if self._env_serial:
+            return f"env_{self._env_serial}"
+        return f"env_{self.config_entry.entry_id}"
+
+    @property
+    def device_name(self) -> str | None:
+        return self._env_name

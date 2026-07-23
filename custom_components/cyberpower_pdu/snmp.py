@@ -350,6 +350,33 @@ class CyberPowerPduClient:
         async with self._lock:
             return await self._fetch_device_info_locked()
 
+    async def async_fetch_environment(self) -> CyberPowerPduEnvironment:
+        """Fetch environment data for the attached environmental sensor."""
+        async with self._lock:
+            env = await self._fetch_environment_locked()
+            if env is None:
+                raise CyberPowerPduSnmpError("Environmental sensor not found")
+            return env
+
+    async def async_detect_environment(self) -> tuple[str | None, str | None]:
+        """Probe for an attached environmental sensor and return (name, serial)."""
+        try:
+            values = await self._get_many_locked((ENVIR2_IDENT_TABLE_SIZE,))
+            size = _as_int(values.get(ENVIR2_IDENT_TABLE_SIZE))
+            if size is None or size < 1:
+                return None, None
+            ident_oids = (
+                f"{ENVIR2_BASE}.1.2.1.3.1",   # name
+                f"{ENVIR2_BASE}.1.2.1.5.1",   # serialNumber
+            )
+            ident_values = await self._get_many_locked(ident_oids)
+            return (
+                _as_text(ident_values.get(ident_oids[0])),
+                _as_text(ident_values.get(ident_oids[1])),
+            )
+        except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
+            return None, None
+
     async def async_fetch(self) -> CyberPowerPduData:
         async with self._lock:
             device = await self._fetch_device_info_locked()

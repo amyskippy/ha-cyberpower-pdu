@@ -20,8 +20,12 @@ from homeassistant.const import (
 )
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import CyberPowerPduConfigEntry, _get_chained_coordinators
+from . import CyberPowerPduConfigEntry, _get_chained_coordinators, _get_environment_coordinator
+from .const import DOMAIN
+from .coordinator import CyberPowerEnvironmentCoordinator
 from .entity import AnyCoordinator, CyberPowerPduEntity
 from .snmp import CyberPowerPduData, CyberPowerPduEnvironment, CyberPowerPduSource
 
@@ -200,11 +204,6 @@ async def async_setup_entry(
             CyberPowerPduSourceSensor(coordinator, description)
             for description in SOURCE_SENSORS
         )
-    if coordinator.data and coordinator.data.environment is not None:
-        entities.extend(
-            CyberPowerPduEnvironmentSensor(coordinator, description)
-            for description in ENVIRONMENT_SENSORS
-        )
 
     # Chained PDU sensors
     chained = _get_chained_coordinators(hass, entry)
@@ -216,6 +215,14 @@ async def async_setup_entry(
                     CyberPowerPduSourceSensor(chained_coord, description)
                     for description in SOURCE_SENSORS
                 )
+
+    # Environmental sensor (own device)
+    env_coord = _get_environment_coordinator(hass, entry)
+    if env_coord is not None:
+        entities.extend(
+            CyberPowerEnvironmentSensor(env_coord, description)
+            for description in ENVIRONMENT_SENSORS
+        )
 
     async_add_entities(entities)
 
@@ -265,29 +272,43 @@ class CyberPowerPduSourceSensor(CyberPowerPduEntity, SensorEntity):
         )
 
 
-class CyberPowerPduEnvironmentSensor(CyberPowerPduEntity, SensorEntity):
+class CyberPowerEnvironmentSensor(
+    CoordinatorEntity[CyberPowerEnvironmentCoordinator], SensorEntity
+):
+    """Environment sensor presented as its own device in Home Assistant."""
+
     entity_description: EnvironmentSensorDescription
+    _attr_has_entity_name = True
 
     def __init__(
-        self, coordinator: AnyCoordinator, description: EnvironmentSensorDescription
+        self, coordinator: CyberPowerEnvironmentCoordinator, description: EnvironmentSensorDescription
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_name = description.name
-        self._attr_unique_id = f"{coordinator.device_identifier}_env_{description.key}"
+        self._attr_unique_id = f"{coordinator.device_identifier}_{description.key}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.coordinator.device_identifier)},
+            manufacturer="CyberPower",
+            model="Environmental Sensor",
+            name=self.coordinator.device_name or "Environmental Sensor",
+            serial_number=self.coordinator._env_serial,
+        )
 
     @property
     def native_value(self) -> float | None:
-        if not self.coordinator.data or not self.coordinator.data.environment:
+        if not self.coordinator.data:
             return None
-        return self.entity_description.value_fn(self.coordinator.data.environment)
+        return self.entity_description.value_fn(self.coordinator.data)
 
     @property
     def available(self) -> bool:
         return (
             super().available
             and self.coordinator.data is not None
-            and self.coordinator.data.environment is not None
             and self.native_value is not None
         )
 

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import islice
-import os
 from typing import Any
 
 from pysnmp.hlapi.v3arch.asyncio import (
@@ -888,24 +887,12 @@ def _raise_on_error(
 
 
 def _create_snmp_engine() -> SnmpEngine:
-    engine = SnmpEngine()
-    mib_builder = engine.message_dispatcher.mib_instrum_controller.get_mib_builder()
-    import pysnmp.smi.mibs as mibs
-    import pysnmp.smi.mibs.instances as mib_instances
+    """Create a minimal SNMP engine.
 
-    mib_builder.load_modules(
-        *_mib_module_names(mibs.__path__[0]),
-        *_mib_module_names(mib_instances.__path__[0]),
-    )
-    return engine
-
-
-def _mib_module_names(path: str) -> tuple[str, ...]:
-    return tuple(
-        filename[:-3]
-        for filename in os.listdir(path)
-        if filename.endswith(".py") and filename != "__init__.py"
-    )
+    All queries in this integration use raw OID strings with lookupMib=False,
+    so no MIB modules need to be loaded.
+    """
+    return SnmpEngine()
 
 
 def _outlet_status_oids(count: int) -> tuple[str, ...]:

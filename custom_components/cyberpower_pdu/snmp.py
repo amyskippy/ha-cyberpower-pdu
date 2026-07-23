@@ -441,19 +441,17 @@ class CyberPowerPduClient:
     ) -> None:
         """Control an outlet on a chained PDU.
 
-        Uses the standard outlet control OID (ATS or ePDU) with the global
-        outlet row index from the ePDU2 switched outlet table.
+        Writes ePDU2OutletSwitchedControlCommand (column 5 of the control table)
+        using the sequential row index from the unified ePDU2 switched outlet table.
+        For the chained PDU (module 2), rows are offset (e.g., 13..22).
         """
         command = OUTLET_COMMAND_ON if on else OUTLET_COMMAND_OFF
-        # Resolve local outlet index to its global table row index
-        global_index = self._outlet_index_map.get(
+        # Resolve local outlet index to its sequential row index (gi) in the unified table
+        row_index = self._outlet_index_map.get(
             module_index, {}
         ).get(local_outlet_index, local_outlet_index)
         async with self._lock:
-            if self._mib_branch == MIB_BRANCH_ATS:
-                oid = f"{ATS_OUTLET_CONTROL}.{ATS_OUTLET_CONTROL_COMMAND_COLUMN}.{global_index}"
-            else:
-                oid = f"{EPDU_OUTLET_CONTROL}.{OUTLET_CONTROL_COMMAND_COLUMN}.{global_index}"
+            oid = f"{EPDU2_OUTLET_SWITCHED_CONTROL}.5.{row_index}"
             await self._set_int_locked(oid, command)
 
     async def async_set_chained_preferred_source(
@@ -593,9 +591,10 @@ class CyberPowerPduClient:
         except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
             total_switched = 0
 
-        # Read moduleIndex and number columns for all outlets to map them
+        # Read moduleIndex, number, and index columns for all outlets
         module_map_oids: list[str] = []
         for gi in range(1, total_switched + 1):
+            module_map_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.1.{gi}")  # index (SNMP row key)
             module_map_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.2.{gi}")  # moduleIndex
             module_map_oids.append(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.3.{gi}")  # number
 
@@ -604,13 +603,17 @@ class CyberPowerPduClient:
         except (CyberPowerPduConnectionError, CyberPowerPduSnmpError):
             module_map_values = {}
 
-        # Build mapping: local_outlet_number -> global_outlet_index for this module
+        # Build mapping: local_outlet_number -> snmp_row_index for this module
+        # The SNMP row index (column 1 "index") is used by the control table
         local_to_global: dict[int, int] = {}
         for gi in range(1, total_switched + 1):
             mi = _as_int(module_map_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.2.{gi}"))
             num = _as_int(module_map_values.get(f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.3.{gi}"))
             if mi == module_index and num is not None:
-                local_to_global[num] = gi
+                row_index = _as_int(module_map_values.get(
+                    f"{EPDU2_OUTLET_SWITCHED_STATUS_ENTRY}.1.{gi}"
+                ))
+                local_to_global[num] = row_index if row_index is not None else gi
 
         outlet_count = len(local_to_global)
         if not outlet_count:

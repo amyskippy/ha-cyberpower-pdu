@@ -88,12 +88,19 @@ EPDU2_DEVICE_CONFIG_ENTRY = f"{EPDU2_IDENT}.3.2.1"
 #   13=powerLowLoadThreshold, 14=powerNearOverloadThreshold,
 #   15=powerOverloadThreshold
 EPDU2_OUTLET_SWITCHED_CONFIG_ENTRY = f"{EPDU2_IDENT}.6.1.2.1"
-EPDU2_OUTLET_SWITCHED_STATUS_ENTRY = f"{EPDU2_IDENT}.6.1.3.1"
+ # ePDU2OutletSwitchedConfigEntry columns:
+#   1=index, 2=moduleIndex, 3=number, 4=name,
+#   5=powerOnTime, 6=powerOffTime, 7=rebootDuration
+EPDU2_OUTLET_SWITCHED_INFO_ENTRY = f"{EPDU2_IDENT}.6.1.3.1"
+# ePDU2OutletSwitchedInfoEntry columns:
+#   1=index, 2=moduleIndex, 3=number, 4=name, 5=bank, 6=phaseLayout
+EPDU2_OUTLET_SWITCHED_STATUS_ENTRY = f"{EPDU2_IDENT}.6.1.4.1"
 # ePDU2OutletSwitchedStatusEntry columns:
 #   1=index, 2=moduleIndex, 3=number, 4=name,
 #   5=state, 6=commandPending
 EPDU2_OUTLET_SWITCHED_CONTROL = f"{EPDU2_IDENT}.6.1.5.1"
-# Column 3 = command (same as ePDU outlet control)
+# ePDU2OutletSwitchedControlEntry columns:
+#   1=index, 2=moduleIndex, 3=number, 4=name, 5=command
 EPDU2_SOURCE_CONFIG = f"{EPDU2_IDENT}.9.2.1"
 EPDU2_SOURCE_STATUS = f"{EPDU2_IDENT}.9.4.1"
 # ePDU2SourceConfigEntry columns:

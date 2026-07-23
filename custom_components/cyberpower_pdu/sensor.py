@@ -247,7 +247,7 @@ class CyberPowerPduSensor(CyberPowerPduEntity, SensorEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.native_value is not None
+        return super().available
 
 
 class CyberPowerPduSourceSensor(CyberPowerPduEntity, SensorEntity):
@@ -271,7 +271,6 @@ class CyberPowerPduSourceSensor(CyberPowerPduEntity, SensorEntity):
             super().available
             and self.coordinator.data is not None
             and self.coordinator.data.source is not None
-            and self.native_value is not None
         )
 
 
